@@ -19,7 +19,8 @@
 use std::ops::Add;
 use bitvec::prelude::*;
 
-pub type Tile = u32;
+// tile index
+pub type Tile = u16;
 
 // we only have 28 pieces, but use 32 to have a POT allowing GRID_MASK to be used instead of modulos
 pub const ROW_SIZE: Tile = 32;
@@ -101,7 +102,43 @@ fn test_direction() {
     assert_eq!(t, TILE_ZERO);
 }
 
-// Efficient set utility.
+// 2D borad location
+pub type Loc = (i8, i8);
+
+pub fn loc_to_tile(loc: Loc) -> Tile {
+    TILE_ZERO.wrapping_add(ROW_SIZE.wrapping_mul(loc.1 as Tile)).wrapping_add(loc.0 as Tile)
+}
+
+pub fn tile_to_loc(tile: Tile) -> Loc {
+    let mut x = (tile.wrapping_sub(TILE_ZERO - ROW_SIZE / 2) / ROW_SIZE) as i8;
+    if x > (ROW_SIZE / 2 - 1) as i8 {
+        x -= ROW_SIZE as i8;
+    }
+    let mut y = (tile.wrapping_sub(TILE_ZERO) % ROW_SIZE) as i8;
+    if y > (ROW_SIZE / 2 - 1) as i8 {
+        y -= ROW_SIZE as i8;
+    }
+    (y, x)
+}
+
+#[test]
+fn test_hex_loc() {
+    let r = (ROW_SIZE / 2) as i8;
+    for x in -r..r {
+        for y in -r..r {
+            let l = (x, y);
+            let t = loc_to_tile(l);
+            assert_eq!(l, tile_to_loc(t), "{} != {},{}", t, l.0, l.1);
+        }
+    }
+    for i in 0..GRID_SIZE as Tile {
+        let t = i as Tile;
+        let l = tile_to_loc(t);
+        assert_eq!(t, loc_to_tile(l), "{} != {},{}", i, l.0, l.1);
+    }
+}
+
+
 pub struct TileSet(BitArr!(for GRID_SIZE, in u32));
 
 impl TileSet {
