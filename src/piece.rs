@@ -15,6 +15,15 @@ impl Color {
             Color::White => Color::Black,
         }
     }
+
+    pub fn from_index(i: u8) -> Self {
+        debug_assert!(i < 2);
+        unsafe { std::mem::transmute(i) }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /* bit 0 = color
@@ -22,27 +31,29 @@ impl Color {
  * bits 4-5 = number
 */
 #[bitfield]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Piece {
-    #[bits = 1] is_some: bool,
-    #[bits = 1] color: Color,
-    #[bits = 3] ptype: Pct,
+    #[bits = 1] pub color: Color,
+    #[bits = 3] pub ptype: Pct,
     num: B2,
-    #[skip] _unused: B1,
+    #[skip] _unused: B2,
 }
 
 impl Piece {
-    fn make(color: Color, pct: Pct, num: u8) -> Self {
+    pub fn make(color: Color, pct: Pct, num: u8) -> Self {
         let p_num = num & 0x3; // 2 bits
         Self::new()
-            .with_is_some(true)
             .with_color(color)
             .with_ptype(pct)
             .with_num(p_num)
     }
 
-    fn empty() -> Self {
-        Self::new().with_is_some(false)
+    pub fn empty() -> Self {
+        Self::new()
+    }
+
+    pub fn is_some(&self) -> bool {
+        self.num() != 0
     }
 }
 
