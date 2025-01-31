@@ -71,7 +71,15 @@ impl Board {
         }
     }
 
-    pub fn do_move(&mut self, action: Action) {
+    fn do_move(&mut self, from: Tile, to: Tile) {
+        let piece = self.world[from as usize];
+        debug_assert!(piece.is_some());
+        self.add_piece(to, piece);
+        self.remove_piece(from);
+    }
+
+    /// assumes the action is legal
+    pub fn do_action(&mut self, action: Action) {
         match action {
             Action::Place(tile, piece_type) => {
                 let num = 1 + TOT_QTY[piece_type as usize] - self.placable[self.color().index()][piece_type as usize];
@@ -80,28 +88,45 @@ impl Board {
                 self.add_piece(tile, piece);
                 self.placable[self.color().index()][piece_type as usize] -= 1;
             }
-            Action::Move(from, to) => {
-                let piece = self.world[from as usize];
-                debug_assert!(piece.is_some());
-                self.add_piece(to, piece);
-                self.remove_piece(from);
-            }
+            Action::Move(from, to) => self.do_move(from, to),
             Action::Pass => {}
         }
         self.turn_num += 1;
+        self.turn_history.push(action);
+    }
+
+    pub fn undo_action(&mut self) {
+        let action = self.turn_history.pop().unwrap();
+        self.turn_num -= 1;
+        match action {
+            Action::Place(tile, piece_type) => {
+                debug_assert!(self.world[tile as usize].ptype() == piece_type);
+                self.remove_piece(tile);
+                self.placable[self.color().index()][piece_type as usize] += 1;
+            }
+            Action::Move(from, to) => self.do_move(to, from),
+            Action::Pass => {}
+        }
     }
 }
 
 #[test]
-fn test_board() {
+fn test_board_do_undo() {
     let mut board = Board::new();
     let a = TILE_ZERO;
     let b = TILE_ZERO + 1;
-    board.do_move(Action::Place(a, PieceType::Queen));
-    board.do_move(Action::Place(b, PieceType::Queen));
-    board.do_move(Action::Move(a, b));
+    board.do_action(Action::Place(a, PieceType::Queen));
+    assert_eq!(board.placable[Color::White.index()][PieceType::Queen as usize], 0);
+    board.do_action(Action::Place(b, PieceType::Queen));
+    assert_eq!(board.placable[Color::Black.index()][PieceType::Queen as usize], 0);
+    board.do_action(Action::Move(a, b));
     assert_eq!(board.world[a as usize], Piece::empty());
     assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
     assert_eq!(*board.underworld[&b].first().unwrap(), Piece::make(Color::Black, PieceType::Queen, 1));
-    assert_eq!(board.placable[Color::White.index()][PieceType::Queen as usize], 0);
+    board.undo_action();
+    assert_eq!(board.world[a as usize], Piece::make(Color::White, PieceType::Queen, 1));
+    assert_eq!(board.world[b as usize], Piece::make(Color::Black, PieceType::Queen, 1));
+    board.undo_action();
+    assert!(board.world[b as usize].is_none());
+    assert_eq!(board.placable[Color::Black.index()][PieceType::Queen as usize], 1);
 }

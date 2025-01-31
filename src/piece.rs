@@ -55,6 +55,10 @@ impl Piece {
     pub fn is_some(&self) -> bool {
         self.num() != 0
     }
+
+    pub fn is_none(&self) -> bool {
+        self.num() == 0
+    }
 }
 
 #[test]
