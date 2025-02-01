@@ -115,7 +115,7 @@ impl Board {
             Action::Place(tile, piece_type) => {
                 debug_assert!(self.world[tile as usize].ptype() == piece_type);
                 self.remove_piece(tile);
-                self.placable[self.color().index()][piece_type as usize] += 1;
+                self.placeable[self.color().index()][piece_type as usize] += 1;
             }
             Action::Move(from, to) => self.do_move(to, from),
             Action::Pass => {}
@@ -129,9 +129,9 @@ fn test_board_do_undo() {
     let a = TILE_ZERO;
     let b = TILE_ZERO + 1;
     board.do_action(Action::Place(a, PieceType::Queen));
-    assert_eq!(board.placable[Color::White.index()][PieceType::Queen as usize], 0);
+    assert_eq!(board.placeable[Color::White.index()][PieceType::Queen as usize], 0);
     board.do_action(Action::Place(b, PieceType::Queen));
-    assert_eq!(board.placable[Color::Black.index()][PieceType::Queen as usize], 0);
+    assert_eq!(board.placeable[Color::Black.index()][PieceType::Queen as usize], 0);
     board.do_action(Action::Move(a, b));
     assert_eq!(board.world[a as usize], Piece::empty());
     assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
@@ -141,5 +141,5 @@ fn test_board_do_undo() {
     assert_eq!(board.world[b as usize], Piece::make(Color::Black, PieceType::Queen, 1));
     board.undo_action();
     assert!(board.world[b as usize].is_none());
-    assert_eq!(board.placable[Color::Black.index()][PieceType::Queen as usize], 1);
+    assert_eq!(board.placeable[Color::Black.index()][PieceType::Queen as usize], 1);
 }
