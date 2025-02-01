@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::tile::{Tile, GRID_SIZE, TILE_ZERO};
 use crate::piece::{Color, Piece};
 use crate::piece_type::PieceType;
+use crate::abstractions::*;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -15,20 +16,27 @@ pub enum Action {
 #[derive(Clone)]
 pub struct Board {
     // the piece on each tile of the board, for stacks: to topmost piece
-    world: [Piece; GRID_SIZE],
+    pub world: [Piece; GRID_SIZE],
     // stacked pieces, from bottom to top
-    underworld: HashMap<Tile, Vec<Piece>>, // aka "sottobosco"
+    pub underworld: HashMap<Tile, Vec<Piece>>, // aka "sottobosco"
     // remaining pieces still to be placed
-    placable: [[u8; 8]; 2],
+    pub placeable: [[u8; 8]; 2],
     // position of the queens
-    queens: [Option<Tile>; 2],
+    pub queens: [Option<Tile>; 2],
     // list of occupied tiles for each player
-    occupied_hexes: [Vec<Tile>; 2],
+    pub occupied_hexes: [Vec<Tile>; 2],
 
     // number of plies played
-    turn_num: usize,
+    pub turn_num: usize,
     // turn history
-    turn_history: Vec<Action>,
+    pub turn_history: Vec<Action>,
+
+
+    // placeable tiles for both players
+    // a tile is placeable for a player if he can put a piece that is not present on the board on it
+    pub tiles_placeable: [TileBitmask; 2],
+
+
 }
 
 const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -38,16 +46,21 @@ impl Board {
         Board {
             world: [Piece::empty(); GRID_SIZE],
             underworld: HashMap::new(),
-            placable: [TOT_QTY, TOT_QTY],
+            placeable: [TOT_QTY, TOT_QTY],
             queens: [None, None],
             occupied_hexes: [Vec::new(), Vec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
+            tiles_placeable: [TileBitmask::new(true), TileBitmask::new(true)],
         }
     }
 
-    fn color(&self) -> Color {
+    pub fn color(&self) -> Color {
         Color::from_index((self.turn_num & 1) as u8)
+    }
+
+    pub fn queen_required(&self) -> bool {
+        self.turn_num > 5 && self.placeable[self.color().index()][PieceType::Queen as usize] > 0 
     }
 
     fn add_piece(&mut self, tile: Tile, piece: Piece) {
@@ -74,11 +87,11 @@ impl Board {
     pub fn do_move(&mut self, action: Action) {
         match action {
             Action::Place(tile, piece_type) => {
-                let num = 1 + TOT_QTY[piece_type as usize] - self.placable[self.color().index()][piece_type as usize];
+                let num = 1 + TOT_QTY[piece_type as usize] - self.placeable[self.color().index()][piece_type as usize];
                 debug_assert!(0 < num && num < 4);
                 let piece = Piece::make(self.color(), piece_type, num);
                 self.add_piece(tile, piece);
-                self.placable[self.color().index()][piece_type as usize] -= 1;
+                self.placeable[self.color().index()][piece_type as usize] -= 1;
             }
             Action::Move(from, to) => {
                 let piece = self.world[from as usize];
@@ -90,6 +103,8 @@ impl Board {
         }
         self.turn_num += 1;
     }
+
+
 }
 
 #[test]
@@ -103,5 +118,5 @@ fn test_board() {
     assert_eq!(board.world[a as usize], Piece::empty());
     assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
     assert_eq!(*board.underworld[&b].first().unwrap(), Piece::make(Color::Black, PieceType::Queen, 1));
-    assert_eq!(board.placable[Color::White.index()][PieceType::Queen as usize], 0);
+    assert_eq!(board.placeable[Color::White.index()][PieceType::Queen as usize], 0);
 }
