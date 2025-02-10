@@ -24,6 +24,20 @@ impl Color {
     pub fn index(self) -> usize {
         self as usize
     }
+
+    pub fn to_char(self) -> char {
+        match self {
+            Color::White => 'w',
+            Color::Black => 'b',
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Color::White => "White",
+            Color::Black => "Black",
+        }
+    }
 }
 
 /* bit 0 = color
@@ -35,17 +49,18 @@ impl Color {
 pub struct Piece {
     #[bits = 1] pub color: Color,
     #[bits = 3] pub ptype: Pct,
-    num: B2,
+    pub num: B2,
     #[skip] _unused: B2,
 }
 
 impl Piece {
     pub fn make(color: Color, pct: Pct, num: u8) -> Self {
-        let p_num = num & 0x3; // 2 bits
+        debug_assert_ne!(num, 0);
+        debug_assert!(num <= 3);
         Self::new()
             .with_color(color)
             .with_ptype(pct)
-            .with_num(p_num)
+            .with_num(num)
     }
 
     pub fn empty() -> Self {

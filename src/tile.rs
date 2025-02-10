@@ -30,7 +30,7 @@ pub const GRID_MASK: Tile = (GRID_SIZE as Tile).wrapping_sub(1);
 pub const TILE_ZERO: Tile = ROW_SIZE / 2 * (ROW_SIZE + 1);
 
 #[repr(u16)]
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Direction {
     NW = (GRID_MASK & (ROW_SIZE + 1).wrapping_neg()) as u16,
     NE = (GRID_MASK & ROW_SIZE.wrapping_neg()) as u16,
@@ -54,14 +54,14 @@ impl Direction {
     }
 }
 
-pub fn adjacent(hex: Tile) -> [Tile; 6] {
+pub fn adjacent(tile: Tile) -> [Tile; 6] {
     [
-        hex + Direction::NW,
-        hex + Direction::NE,
-        hex + Direction::E,
-        hex + Direction::SE,
-        hex + Direction::SW,
-        hex + Direction::W,
+        tile + Direction::NW,
+        tile + Direction::NE,
+        tile + Direction::E,
+        tile + Direction::SE,
+        tile + Direction::SW,
+        tile + Direction::W,
     ]
 }
 

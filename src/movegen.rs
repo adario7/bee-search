@@ -91,9 +91,9 @@ impl Board {
     }
 
     fn set_all_placeables(&mut self, player : Color) {
-        let siz = self.occupied_hexes[player as usize].len();
+        let siz = self.occupied_tiles[player as usize].len();
         for i in 0..siz {
-            let tile = self.occupied_hexes[player as usize][i];
+            let tile = self.occupied_tiles[player as usize][i];
             for adj in adjacent(tile) {
                 self.set_placeable(tile, player);
             }
@@ -108,7 +108,7 @@ impl Board {
         self.set_all_placeables(player);
         
         let mut vis = TileBitmask::new(false);
-        for &tile in self.occupied_hexes[player.index()].iter() {
+        for &tile in self.occupied_tiles[player.index()].iter() {
             for adj in adjacent(tile) {
                 if vis.is_on(adj) {
                     continue;
@@ -171,7 +171,7 @@ impl Board {
 
         
 
-        let start = self.occupied_hexes[0][0];
+        let start = self.occupied_tiles[0][0];
         dfs(&self.world, &mut dis, &mut cut, start, 1);
         cut
 

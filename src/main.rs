@@ -3,8 +3,11 @@ mod piece_type;
 mod piece;
 mod board;
 mod movegen;
+mod uhp;
+mod board_io;
 mod abstractions;
 
 fn main() {
-    println!("Hello, world!");
+    let mut uhp = uhp::Uhp::new();
+    uhp.io_loop();
 }
