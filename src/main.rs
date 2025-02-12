@@ -6,6 +6,7 @@ mod movegen;
 mod uhp;
 mod board_io;
 mod abstractions;
+mod perft;
 
 fn main() {
     let mut uhp = uhp::Uhp::new();

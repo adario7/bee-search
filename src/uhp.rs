@@ -2,6 +2,7 @@ use std::io::stdin;
 use std::time::Duration;
 
 use crate::board::Board;
+use crate::perft::{self, perft};
 
 pub struct Uhp {
     board: Board
@@ -126,8 +127,8 @@ impl Uhp {
     }
 
     fn perft(&mut self, args: &str) -> UhpResult<()> {
-        let _depth = args.parse::<u8>().unwrap_or(20);
-        // TODO: run perft
+        let depth = args.parse::<usize>().unwrap_or(8);
+        perft::perft(&mut self.board, depth);
         Ok(())
     }
 
