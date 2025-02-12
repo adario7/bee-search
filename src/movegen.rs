@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 
 use crate::abstractions::{TileBitmask, ActionContainer};
 use crate::board::{Action, Board};
-use crate::piece::{Color, Piece};
+use crate::piece::{self, Color, Piece};
 use crate::piece_type::PieceType;
-use crate::tile::{self, adjacent, Direction, Tile, GRID_SIZE};
+use crate::tile::{self, adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::movegen::Action::{Place, Move};
 
 // precomputation of slidable directions for every possible neighborhood configuration
@@ -105,6 +105,26 @@ impl Board {
     fn generate_placements(&mut self, moves : &mut ActionContainer) {
 
         let player = self.color();
+
+        if self.turn_history.len() < 2 {
+
+            if self.turn_history.len() == 0 {
+                for bug in PieceType::iter_all() {
+                    if self.placeable[player.index()][bug as usize] > 0 && bug != PieceType::Queen {
+                        moves.push(Place(TILE_ZERO as u16, bug));
+                    }
+                }
+            }else {
+                for tile in adjacent(TILE_ZERO) {
+                    for bug in PieceType::iter_all() {
+                        if self.placeable[player.index()][bug as usize] > 0 && bug != PieceType::Queen {
+                            moves.push(Place(tile as u16, bug));
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         // right now it is slow, ideally we want to call set_placeable every time we modify the board only on the cells adjacent to the modification
         self.set_all_placeables(player);
@@ -373,6 +393,10 @@ impl Board {
         let mut moves = ActionContainer::new();
         self.generate_placements(&mut moves);
 
+        if self.turn_history.len() < 2 {
+            return moves.moves;
+        }
+
         let mut cut_vertices = self.find_cut_vertices();
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
@@ -402,5 +426,26 @@ impl Board {
         }
 
         moves.moves
+    }
+}
+
+#[test]
+fn test_first_move(){
+    let mut board = Board::new();
+    println!("Ciao");
+    let moves = board.generate_moves();
+
+    for action in moves {
+        match action {
+            Place(tile, piece  ) => {
+                println!("Place {} {}", tile, piece as usize);
+            },
+            Move(from, to ) => {
+                println!("Move {} {}", from, to);
+            },
+            _ => {
+                println!("Pass")
+            }
+        }
     }
 }
