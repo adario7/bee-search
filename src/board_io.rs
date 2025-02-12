@@ -159,7 +159,7 @@ impl Board {
         out
     }
 
-    pub fn legal_moves_string(&self) -> String {
+    pub fn legal_moves_string(&mut self) -> String {
         self.generate_moves()
             .iter().map(|&m| self.action_to_string(m))
             .collect::<Vec<_>>().join(";")

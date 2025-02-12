@@ -1,11 +1,12 @@
 use std::cmp::{min, max};
 use lazy_static::lazy_static;
+use std::collections::VecDeque;
 
-use crate::abstractions::TileBitmask;
+use crate::abstractions::{TileBitmask, ActionContainer};
 use crate::board::{Action, Board};
 use crate::piece::{Color, Piece};
 use crate::piece_type::PieceType;
-use crate::tile::{adjacent, Tile, Direction, GRID_SIZE};
+use crate::tile::{self, adjacent, Direction, Tile, GRID_SIZE};
 use crate::movegen::Action::{Place, Move};
 
 // precomputation of slidable directions for every possible neighborhood configuration
@@ -36,7 +37,7 @@ lazy_static! {
 
         directions
     };
-
+/*
     static ref SLIDABLE_DIRECTIONS_BEETLE: [Vec<Direction>; 1<<6] = {
         let mut directions: [Vec<Direction>; 1<<6] = std::array::from_fn(|_| Vec::new());
 
@@ -52,6 +53,7 @@ lazy_static! {
 
         directions
     };
+    */
 }
 
 
@@ -100,7 +102,7 @@ impl Board {
         }
     }
 
-    fn generate_placements(&mut self, moves : &mut Vec<Action>) {
+    fn generate_placements(&mut self, moves : &mut ActionContainer) {
 
         let player = self.color();
 
@@ -189,20 +191,216 @@ impl Board {
             }
         }
 
-        if self.world[origin as usize].ptype() == PieceType::Beetle {
-            SLIDABLE_DIRECTIONS_BEETLE[bitmask].iter()
+        SLIDABLE_DIRECTIONS[bitmask].iter()
+
+    }
+
+    fn slidable_adjacent_beetle(&self, tile: Tile, origin: Tile) -> Vec<Direction> {
+        let directions = Direction::all();
+        let neighbors = adjacent(tile);
+        let mut moves: Vec<Direction> = Vec::new();
+
+        let mut curr_height = self.height(tile);
+
+        if tile == origin {
+            curr_height -= 1;
         }
-        else{
-            SLIDABLE_DIRECTIONS[bitmask].iter()
+
+        for i in 0..6 {
+            let prev = (i + 5)%6;
+            let next = (i + 1)%6;
+
+            let max_height = max(curr_height, self.height(neighbors[i]));
+            let min_height = min(self.height(neighbors[prev]), self.height(neighbors[next]));
+
+            if max_height >= min_height {
+                moves.push(directions[i]);
+            }
+
+        }
+
+        moves
+    }
+
+    fn generate_walk1(&self, origin: Tile, moves : &mut ActionContainer) {
+
+        for dir in self.slidable_adjacent(origin , origin) {
+            moves.push(Move(origin, origin + *dir));
         }
 
     }
 
-    fn generate_slidable_tiles(){
-        todo!()
+    fn generate_beetle(&self, origin: Tile, moves : &mut ActionContainer) {
+        for dir in self.slidable_adjacent_beetle(origin, origin) {
+            moves.push(Move(origin, origin + dir));
+        }
     }
 
-    pub fn generate_moves(&self) -> Vec<Action> {
-        todo!()
+    fn generate_spider(&self, origin: Tile, moves : &mut ActionContainer) {
+
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, true);
+
+        for d1 in self.slidable_adjacent(origin, origin) {
+            let t1 = origin + *d1;
+            for d2 in self.slidable_adjacent(t1, origin) {
+                let t2 = t1 + *d2;
+                if t2 != origin {
+                    for d3 in self.slidable_adjacent(t2, origin) {
+                        let t3 = t2 + *d3;
+                        if t3 != t1 && !vis.is_on(t3) {
+                            moves.push(Move(origin, t3));
+                            vis.set_bit(t3, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn generate_grasshopper(&self, origin : Tile, moves : &mut ActionContainer) {
+        
+        for dir in Direction::all() {
+            let mut next = origin + *dir;
+
+            if self.world[next as usize].is_some() {
+
+                while(self.world[next as usize].is_some()) {
+                    next = next + *dir;
+                }
+
+                moves.push(Move(origin, next));
+            }
+        }
+    }
+
+    fn generate_ladybug(&self, origin: Tile, moves : &mut ActionContainer) {
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, true);
+
+        for d1 in self.slidable_adjacent_beetle(origin, origin) {
+            let t1 = origin + d1;
+            if self.world[t1 as usize].is_some() {
+                for d2 in self.slidable_adjacent_beetle(t1, origin) {
+                    let t2 = t1 + d2;
+                    if t2 != origin && self.world[t2 as usize].is_some() {
+                        for d3 in self.slidable_adjacent_beetle(t2, origin) {
+                            let t3 = t2 + d3;
+                            if t3 != t1 && self.world[t3 as usize].is_none() && !vis.is_on(t3) {
+                                moves.push(Move(origin, t3));
+                                vis.set_bit(t3, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn generate_ant(&self, origin: Tile, moves : &mut ActionContainer) {
+
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, false);
+
+        let mut queue: VecDeque<Tile> = VecDeque::new();
+        queue.push_back(origin);
+
+
+        while let Some(tile) = queue.pop_front() {
+            
+            for dir in self.slidable_adjacent(tile, origin) {
+                if !vis.is_on(tile + *dir) {
+                    moves.push(Move(origin, tile + *dir));
+                    vis.set_bit(tile + *dir, true);
+                }
+            }
+
+        }
+
+    }
+    
+    fn generate_pillbug(&self, cut_vertices: &TileBitmask, origin: Tile, moves : &mut ActionContainer){
+        self.generate_walk1(origin, moves);
+
+        for start in adjacent(origin) {
+            for end in adjacent(origin) {
+                if start != end && !cut_vertices.is_on(start) && self.height(start) == 1 && self.height(end) == 0{
+                    moves.push(Move(start, end));
+                }
+            }
+        }
+    }
+
+    fn generate_mosquito(&self, cut_vertices: &TileBitmask, origin: Tile, moves : &mut ActionContainer) {
+
+        let mut adjacent_pieces = [false; 8];
+        for adj in adjacent(origin) {
+            if self.world[adj as usize].is_some() {
+                adjacent_pieces[self.world[adj as usize].ptype() as usize] = true;
+            }
+        }
+
+        if adjacent_pieces[PieceType::Ant as usize] {
+            self.generate_ant(origin, moves);
+        }else {
+            if adjacent_pieces[PieceType::Queen as usize] || adjacent_pieces[PieceType::Pillbug as usize] {
+                self.generate_walk1(origin, moves);
+            }
+            if adjacent_pieces[PieceType::Spider as usize] {
+                self.generate_spider(origin, moves);
+            }
+        }
+
+        if adjacent_pieces[PieceType::Beetle as usize] {
+            self.generate_beetle(origin, moves);
+        }
+
+        if adjacent_pieces[PieceType::Grasshopper as usize] {
+            self.generate_grasshopper(origin, moves);   
+        }
+
+        if adjacent_pieces[PieceType::Ladybug as usize] {
+            self.generate_ladybug(origin, moves);
+        }
+
+        if adjacent_pieces[PieceType::Pillbug as usize] {
+            self.generate_pillbug(cut_vertices, origin, moves);
+        }
+    }
+
+    pub fn generate_moves(&mut self) -> Vec<Action> {
+
+        let mut moves = ActionContainer::new();
+        self.generate_placements(&mut moves);
+
+        let mut cut_vertices = self.find_cut_vertices();
+        let stunned = match self.turn_history.last() {
+            Some(Action::Move(_, dest)) => Some(dest),
+            _ => None,
+        };
+        if let Some(moved) = stunned {
+            cut_vertices.set_bit(*moved, true);
+        }
+
+
+
+        for tile in self.occupied_tiles[self.color() as usize].iter() {
+            if Some(tile) == stunned {
+                continue;
+            }
+
+            match self.world[*tile as usize].ptype() {
+                PieceType::Queen => self.generate_walk1(*tile, &mut moves),
+                PieceType::Grasshopper => self.generate_grasshopper(*tile, &mut moves),
+                PieceType::Spider => self.generate_spider(*tile, &mut moves),
+                PieceType::Ant => self.generate_ant(*tile, &mut moves),
+                PieceType::Beetle => self.generate_beetle(*tile, &mut moves),
+                PieceType::Mosquito => self.generate_mosquito(&cut_vertices, *tile, &mut moves),
+                PieceType::Ladybug => self.generate_ladybug(*tile, &mut moves),
+                PieceType::Pillbug => self.generate_pillbug(&cut_vertices, *tile, &mut moves)
+            };
+        }
+
+        moves.moves
     }
 }

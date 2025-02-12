@@ -70,6 +70,13 @@ impl Board {
         self.turn_num > 5 && self.placeable[self.color().index()][PieceType::Queen as usize] > 0 
     }
 
+    pub fn height(&self, tile: Tile) -> i32 {
+        if let Some(vec) = self.underworld.get(&tile) {
+            return (vec.len() + 1) as i32;
+        }
+        return (self.world[tile as usize] != Piece::empty()) as i32;
+    } 
+
     fn add_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
         if !vec.contains(&t) {
