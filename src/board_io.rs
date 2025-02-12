@@ -112,7 +112,7 @@ impl Board {
     }
 
     fn game_type(&self) -> &'static str {
-        "Base+MLP"
+        "Base+MLP" // TODO: add support for other game types
     }
 
     fn game_result_string(&self) -> &'static str {
@@ -169,7 +169,7 @@ impl Board {
 // board input parsing
 impl Board {
     fn parse_game_type(game_type: &str) -> UhpResult<Self> {
-        if game_type != "Base+MLP" {
+        if game_type != "Base+MLP" { // TODO: add support for other game types
             return Err(UhpError::InvalidGameType(game_type.to_owned()));
         }
         Ok(Board::new())

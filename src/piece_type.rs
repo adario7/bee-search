@@ -16,6 +16,10 @@ pub enum PieceType {
 pub type Pct = PieceType;
 
 impl PieceType {
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub fn iter_all() -> impl Iterator<Item = Self> {
         [
             PieceType::Queen,

@@ -52,6 +52,29 @@ impl Direction {
     pub fn all() -> &'static [Direction; 6] {
         &[Direction::NW, Direction::NE, Direction::E, Direction::SE, Direction::SW, Direction::W]
     }
+
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => Direction::NW,
+            1 => Direction::NE,
+            2 => Direction::E,
+            3 => Direction::SE,
+            4 => Direction::SW,
+            5 => Direction::W,
+            _ => panic!("Invalid index"),
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Direction::NW => 0,
+            Direction::NE => 1,
+            Direction::E => 2,
+            Direction::SE => 3,
+            Direction::SW => 4,
+            Direction::W => 5,
+        }
+    }
 }
 
 pub fn adjacent(tile: Tile) -> [Tile; 6] {

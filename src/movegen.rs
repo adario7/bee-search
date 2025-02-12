@@ -25,7 +25,7 @@ lazy_static! {
             }
 
             for dir in Direction::all() {
-                let i = *dir as usize;
+                let i = dir.index();
                 let prev = (i + 5)%6;
                 let next = (i + 1)%6;
                 
@@ -63,7 +63,7 @@ impl Board {
     // tiles_placeable[player][tile] is true iff the player can place a bug on the tile
     fn set_placeable(&mut self, tile : Tile, player : Color) {
         // there is already a piece the tile cannot be placeable
-        if self.world[tile as usize].is_some() {
+        if self.tile(tile).is_some() {
             self.tiles_placeable[player.index()].set_bit(tile, false);
             return;
         }
@@ -71,7 +71,7 @@ impl Board {
         // flg checks if there is at least one tile with the same color adjacent to the current one
         let mut flg = false;
         for adj in adjacent(tile){
-            let adj_piece = self.world[adj as usize];
+            let adj_piece = self.tile(adj);
 
             if adj_piece.is_some() {
                 if adj_piece.color() == player {
@@ -93,9 +93,9 @@ impl Board {
     }
 
     fn set_all_placeables(&mut self, player : Color) {
-        let siz = self.occupied_tiles[player as usize].len();
+        let siz = self.occupied_tiles[player.index()].len();
         for i in 0..siz {
-            let tile = self.occupied_tiles[player as usize][i];
+            let tile = self.occupied_tiles[player.index()][i];
             for adj in adjacent(tile) {
                 self.set_placeable(tile, player);
             }
@@ -110,14 +110,14 @@ impl Board {
 
             if self.turn_history.len() == 0 {
                 for bug in PieceType::iter_all() {
-                    if self.placeable[player.index()][bug as usize] > 0 && bug != PieceType::Queen {
+                    if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
                         moves.push(Place(TILE_ZERO as u16, bug));
                     }
                 }
             }else {
                 for tile in adjacent(TILE_ZERO) {
                     for bug in PieceType::iter_all() {
-                        if self.placeable[player.index()][bug as usize] > 0 && bug != PieceType::Queen {
+                        if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
                             moves.push(Place(tile as u16, bug));
                         }
                     }
@@ -144,7 +144,7 @@ impl Board {
                     }
                     else {
                     for bug in PieceType::iter_all(){
-                            if self.placeable[player.index()][bug as usize] > 0 {
+                            if self.placeable[player.index()][bug.index()] > 0 {
                                 moves.push(Place(adj, bug));
                             }
                         }
@@ -206,7 +206,7 @@ impl Board {
         let mut bitmask = 0;
 
         for i in 0..6 {
-            if self.world[neighbors[i] as usize].is_some() && neighbors[i] != origin{
+            if self.tile(neighbors[i]).is_some() && neighbors[i] != origin{
                 bitmask |= 1 << i;
             }
         }
@@ -283,9 +283,9 @@ impl Board {
         for dir in Direction::all() {
             let mut next = origin + *dir;
 
-            if self.world[next as usize].is_some() {
+            if self.tile(next).is_some() {
 
-                while(self.world[next as usize].is_some()) {
+                while(self.tile(next).is_some()) {
                     next = next + *dir;
                 }
 
@@ -300,13 +300,13 @@ impl Board {
 
         for d1 in self.slidable_adjacent_beetle(origin, origin) {
             let t1 = origin + d1;
-            if self.world[t1 as usize].is_some() {
+            if self.tile(t1).is_some() {
                 for d2 in self.slidable_adjacent_beetle(t1, origin) {
                     let t2 = t1 + d2;
-                    if t2 != origin && self.world[t2 as usize].is_some() {
+                    if t2 != origin && self.tile(t2).is_some() {
                         for d3 in self.slidable_adjacent_beetle(t2, origin) {
                             let t3 = t2 + d3;
-                            if t3 != t1 && self.world[t3 as usize].is_none() && !vis.is_on(t3) {
+                            if t3 != t1 && self.tile(t3).is_none() && !vis.is_on(t3) {
                                 moves.push(Move(origin, t3));
                                 vis.set_bit(t3, true);
                             }
@@ -355,35 +355,35 @@ impl Board {
 
         let mut adjacent_pieces = [false; 8];
         for adj in adjacent(origin) {
-            if self.world[adj as usize].is_some() {
-                adjacent_pieces[self.world[adj as usize].ptype() as usize] = true;
+            if self.tile(adj).is_some() {
+                adjacent_pieces[self.tile(adj).ptype().index()] = true;
             }
         }
 
-        if adjacent_pieces[PieceType::Ant as usize] {
+        if adjacent_pieces[PieceType::Ant.index()] {
             self.generate_ant(origin, moves);
         }else {
-            if adjacent_pieces[PieceType::Queen as usize] || adjacent_pieces[PieceType::Pillbug as usize] {
+            if adjacent_pieces[PieceType::Queen.index()] || adjacent_pieces[PieceType::Pillbug.index()] {
                 self.generate_walk1(origin, moves);
             }
-            if adjacent_pieces[PieceType::Spider as usize] {
+            if adjacent_pieces[PieceType::Spider.index()] {
                 self.generate_spider(origin, moves);
             }
         }
 
-        if adjacent_pieces[PieceType::Beetle as usize] {
+        if adjacent_pieces[PieceType::Beetle.index()] {
             self.generate_beetle(origin, moves);
         }
 
-        if adjacent_pieces[PieceType::Grasshopper as usize] {
+        if adjacent_pieces[PieceType::Grasshopper.index()] {
             self.generate_grasshopper(origin, moves);   
         }
 
-        if adjacent_pieces[PieceType::Ladybug as usize] {
+        if adjacent_pieces[PieceType::Ladybug.index()] {
             self.generate_ladybug(origin, moves);
         }
 
-        if adjacent_pieces[PieceType::Pillbug as usize] {
+        if adjacent_pieces[PieceType::Pillbug.index()] {
             self.generate_pillbug(cut_vertices, origin, moves);
         }
     }
@@ -408,12 +408,12 @@ impl Board {
 
 
 
-        for tile in self.occupied_tiles[self.color() as usize].iter() {
+        for tile in self.occupied_tiles[self.color().index()].iter() {
             if Some(tile) == stunned {
                 continue;
             }
 
-            match self.world[*tile as usize].ptype() {
+            match self.tile(*tile).ptype() {
                 PieceType::Queen => self.generate_walk1(*tile, &mut moves),
                 PieceType::Grasshopper => self.generate_grasshopper(*tile, &mut moves),
                 PieceType::Spider => self.generate_spider(*tile, &mut moves),
@@ -438,7 +438,7 @@ fn test_first_move(){
     for action in moves {
         match action {
             Place(tile, piece  ) => {
-                println!("Place {} {}", tile, piece as usize);
+                println!("Place {} {}", tile, piece.index());
             },
             Move(from, to ) => {
                 println!("Move {} {}", from, to);
