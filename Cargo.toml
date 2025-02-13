@@ -2,6 +2,7 @@
 name = "bee-search"
 version = "0.1.0"
 edition = "2021"
+default-run = "bee-search"
 
 [dependencies]
 bitvec = "1"
