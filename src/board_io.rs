@@ -1,3 +1,5 @@
+use std::option;
+
 use crate::uhp::{UhpError, UhpResult};
 use crate::tile::{Direction, Tile, TILE_ZERO};
 use crate::piece_type::{Pct, PieceType};
@@ -111,10 +113,6 @@ impl Board {
         out
     }
 
-    fn game_type(&self) -> &'static str {
-        "Base+MLP" // TODO: add support for other game types
-    }
-
     fn game_result_string(&self) -> &'static str {
         if self.turn_history.is_empty() {
             return "NotStarted";
@@ -133,7 +131,7 @@ impl Board {
 
 
     fn game_log_string(&self) -> String {
-        let mut board = Board::parse_game_type(&self.game_type()).unwrap();
+        let mut board = Board::parse_game_type(&self.gametype).unwrap();
         let mut log = String::new();
         for &m in &self.turn_history {
             log.push_str(&board.action_to_string(m));
@@ -147,7 +145,7 @@ impl Board {
     }
 
     pub fn game_string(&self) -> String {
-        let mut out = self.game_type().to_owned();
+        let mut out = self.gametype.clone();
         out.push(';');
         out.push_str(self.game_result_string());
         out.push(';');
@@ -169,10 +167,28 @@ impl Board {
 // board input parsing
 impl Board {
     fn parse_game_type(game_type: &str) -> UhpResult<Self> {
-        if game_type != "Base+MLP" { // TODO: add support for other game types
+        let mut options = game_type.split(':');
+        
+        if options.next() != Some("Base") { // TODO: add support for other game types
             return Err(UhpError::InvalidGameType(game_type.to_owned()));
         }
-        Ok(Board::new())
+
+        let str = options.next().unwrap_or("");
+        let mut M = 0u8;
+        let mut L = 0u8;
+        let mut P = 0u8;
+
+        if str.contains('M') {
+            M = 1u8;
+        }
+        if str.contains('L') {
+            L = 1u8;
+        }
+        if str.contains('P') {
+            P = 1u8;
+        }
+
+        Ok(Board::new_mlp(M, L, P))
     }
 
     // parses piece descrption -> (piece, direction), e.g. "wB2-" -> ((White, Beetle, 2), NW)

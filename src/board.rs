@@ -23,6 +23,7 @@ pub enum GameResult {
 
 #[derive(Clone)]
 pub struct Board {
+    pub gametype: String,
     // the piece on each tile of the board, for stacks: to topmost piece
     pub world: [Piece; GRID_SIZE],
     // stacked pieces, from bottom to top
@@ -47,9 +48,33 @@ const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
 impl Board {
     pub fn new() -> Self {
         Board {
+            gametype: "Base+MLP".to_string(),
             world: [Piece::empty(); GRID_SIZE],
             underworld: HashMap::new(),
             placeable: [TOT_QTY, TOT_QTY],
+            queens: [None, None],
+            occupied_tiles: [Vec::new(), Vec::new()],
+            turn_num: 0,
+            turn_history: Vec::new(),
+            tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
+        }
+    }
+
+    pub fn new_mlp(M: u8, L: u8, P: u8) -> Self {
+        Board {
+            gametype: format!(
+                "Base{}",
+                if M + L + P > 0 {
+                    format!("+{}{}{}",
+                        if M > 0 {"M"} else {""},
+                        if L > 0 {"L"} else {""},
+                        if P > 0 {"P"} else {""},
+                    )
+                }else {"".to_string()}
+            ),
+            world: [Piece::empty(); GRID_SIZE],
+            underworld: HashMap::new(),
+            placeable: [[1, 3, 2, 3, 2, M, L, P], [1, 3, 2, 3, 2, M, L, P]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
             occupied_tiles: [Vec::new(), Vec::new()],
             turn_num: 0,
