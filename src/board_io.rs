@@ -11,7 +11,7 @@ impl PieceType {
 }
 
 impl Direction {
-    fn prefix_name(self) -> &'static str {
+    fn suffix_name(self) -> &'static str {
         match self {
             Self::SE => "\\",
             Self::E => "-",
@@ -19,7 +19,7 @@ impl Direction {
             _ => "",
         }
     }
-    fn suffix_name(self) -> &'static str {
+    fn prefix_name(self) -> &'static str {
         match self {
             Self::SW => "/",
             Self::W => "-",
@@ -81,9 +81,9 @@ impl Board {
         for dir in Direction::all() {
             let adj = self.tile(tile + *dir);
             if adj.is_some() {
-                out.push_str(dir.prefix_name());
+                out.push_str(dir.opposite().prefix_name());
                 self.piece_name(adj, out);
-                out.push_str(dir.suffix_name());
+                out.push_str(dir.opposite().suffix_name());
                 return;
             }
         }
@@ -250,3 +250,5 @@ impl Board {
         Ok(board)
     }
 }
+
+

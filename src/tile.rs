@@ -75,6 +75,17 @@ impl Direction {
             Direction::W => 5,
         }
     }
+
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::NW => Direction::SE,
+            Direction::NE => Direction::SW,
+            Direction::E  => Direction::W,
+            Direction::SE => Direction::NW,
+            Direction::SW => Direction::NE,
+            Direction::W  => Direction::E,
+        }
+    }
 }
 
 pub fn adjacent(tile: Tile) -> [Tile; 6] {

@@ -84,12 +84,7 @@ impl Board {
             }
         }
 
-        if flg {
-            self.tiles_placeable[player.index()].set_bit(tile, true);
-        }
-        else {
-            self.tiles_placeable[player.index()].set_bit(tile, false);
-        }
+        self.tiles_placeable[player.index()].set_bit(tile, flg);
     }
 
     fn set_all_placeables(&mut self, player : Color) {
@@ -97,7 +92,7 @@ impl Board {
         for i in 0..siz {
             let tile = self.occupied_tiles[player.index()][i];
             for adj in adjacent(tile) {
-                self.set_placeable(tile, player);
+                self.set_placeable(adj, player);
             }
         }
     }
@@ -353,6 +348,11 @@ impl Board {
 
     fn generate_mosquito(&self, cut_vertices: &TileBitmask, origin: Tile, moves : &mut ActionContainer) {
 
+        if self.height(origin) > 1 {
+            self.generate_beetle(origin, moves);
+            return;
+        }
+
         let mut adjacent_pieces = [false; 8];
         for adj in adjacent(origin) {
             if self.tile(adj).is_some() {
@@ -390,14 +390,21 @@ impl Board {
 
     pub fn generate_moves(&mut self) -> Vec<Action> {
 
+        //println!("generate moves");
+
         let mut moves = ActionContainer::new();
         self.generate_placements(&mut moves);
 
-        if self.turn_history.len() < 2 {
+        //println!("placements done");
+
+        if self.turn_history.len() < 2 || self.placeable[self.color().index()][PieceType::Queen as usize] > 0 {
             return moves.moves;
         }
 
         let mut cut_vertices = self.find_cut_vertices();
+
+        //println!("cus done");
+
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
             _ => None,
@@ -406,7 +413,7 @@ impl Board {
             cut_vertices.set_bit(*moved, true);
         }
 
-
+        //println!("stunned found");
 
         for tile in self.occupied_tiles[self.color().index()].iter() {
             if Some(tile) == stunned {
@@ -432,20 +439,12 @@ impl Board {
 #[test]
 fn test_first_move(){
     let mut board = Board::new();
-    println!("Ciao");
-    let moves = board.generate_moves();
+    
+    board.do_action(Place(TILE_ZERO, PieceType::Ant));
+    board.do_action(Place(TILE_ZERO + Direction::E, PieceType::Ant));
 
-    for action in moves {
-        match action {
-            Place(tile, piece  ) => {
-                println!("Place {} {}", tile, piece.index());
-            },
-            Move(from, to ) => {
-                println!("Move {} {}", from, to);
-            },
-            _ => {
-                println!("Pass")
-            }
-        }
+    for action in board.generate_moves() {
+        println!("{:?}", action);
     }
+
 }

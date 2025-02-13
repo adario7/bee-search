@@ -54,7 +54,7 @@ impl Board {
             occupied_tiles: [Vec::new(), Vec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
-            tiles_placeable: [TileBitmask::new(true), TileBitmask::new(true)],
+            tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
         }
     }
 
