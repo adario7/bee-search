@@ -390,20 +390,14 @@ impl Board {
 
     pub fn generate_moves(&mut self) -> Vec<Action> {
 
-        //println!("generate moves");
-
         let mut moves = ActionContainer::new();
         self.generate_placements(&mut moves);
-
-        //println!("placements done");
 
         if self.turn_history.len() < 2 || self.placeable[self.color().index()][PieceType::Queen as usize] > 0 {
             return moves.moves;
         }
 
         let mut cut_vertices = self.find_cut_vertices();
-
-        //println!("cus done");
 
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
@@ -412,8 +406,6 @@ impl Board {
         if let Some(moved) = stunned {
             cut_vertices.set_bit(*moved, true);
         }
-
-        //println!("stunned found");
 
         for tile in self.occupied_tiles[self.color().index()].iter() {
             if Some(tile) == stunned {
