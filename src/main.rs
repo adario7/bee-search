@@ -7,6 +7,8 @@ mod uhp;
 mod board_io;
 mod abstractions;
 mod perft;
+mod eval;
+mod engine;
 
 fn main() {
     let mut uhp = uhp::Uhp::new();

@@ -2,10 +2,12 @@ use std::io::stdin;
 use std::time::Duration;
 
 use crate::board::Board;
-use crate::perft::{self, perft};
+use crate::engine::{Depth, Engine};
+use crate::perft;
 
 pub struct Uhp {
-    board: Board
+    board: Board,
+    engine: Engine
 }
 
 #[derive(Debug)]
@@ -33,7 +35,8 @@ pub type UhpResult<T> = std::result::Result<T, UhpError>;
 impl Uhp {
     pub fn new() -> Uhp {
         Uhp {
-            board: Board::new()
+            board: Board::new(),
+            engine: Engine::new()
         }
     }
 
@@ -70,16 +73,16 @@ impl Uhp {
     }
 
     fn best_move(&mut self, args: &str) -> UhpResult<()> {
-        if let Some(arg) = args.strip_prefix("depth ") {
-            let _depth = arg.parse::<u8>().map_err(|_| UhpError::SyntaxError(args.to_string()))?;
-            // TODO: use depth
+        let (depth, time) = if let Some(arg) = args.strip_prefix("depth ") {
+            let depth = arg.parse::<Depth>().map_err(|_| UhpError::SyntaxError(args.to_string()))?;
+            (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
-            let _time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
-            // TODO: use dur
+            let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
+            (99, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
-        }
-        let m = *self.board.generate_moves().first().unwrap(); // TODO: implement ai
+        };
+        let m = self.engine.best_move(&mut self.board, depth, time);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
