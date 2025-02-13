@@ -131,7 +131,7 @@ impl Uhp {
 
     fn perft(&mut self, args: &str) -> UhpResult<()> {
         let depth = args.parse::<usize>().unwrap_or(8);
-        perft::perft(&mut self.board, depth);
+        perft::display_perft(&mut self.board, depth);
         Ok(())
     }
 
