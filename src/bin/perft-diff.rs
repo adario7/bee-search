@@ -140,11 +140,11 @@ fn read_lines_until_ok<R: BufRead>(reader: &mut R) -> Vec<String> {
 }
 
 fn parse_perft_value(lines: &[String], depth: usize) -> Option<usize> {
-    let pattern = format!(r"perft\({}\)\s*=\s*([\d,]+)", depth);
+    let pattern = format!(r"perft\({}\)\s*=\s*([\d.,]+)", depth);
     let re = Regex::new(&pattern).ok()?;
     for line in lines {
         if let Some(caps) = re.captures(line) {
-            let num_str = caps.get(1)?.as_str().replace(",", "");
+            let num_str = caps.get(1)?.as_str().replace(".", "").replace(",", "");
             return num_str.parse::<usize>().ok();
         }
     }
