@@ -1,3 +1,4 @@
+use core::num;
 use std::cmp::{min, max};
 use lazy_static::lazy_static;
 use std::collections::VecDeque;
@@ -160,22 +161,23 @@ impl Board {
             let mut min_dis = GRID_SIZE as i32;
             let mut num_children = 0;
 
-            cut.set_bit(node, true);
-
             for adj in adjacent(node) {
                 if world[adj as usize].is_none() {
                     continue;
                 }
-
+                
                 if dis[adj as usize] == 0 {
                     num_children += 1;
-                    if dfs(world, dis, cut, adj, p+1) < dis[node as usize] {
-                        cut.set_bit(node, false);
+                    let adj_d = dfs(world, dis, cut, adj, p+1);
+                    if adj_d >= dis[node as usize] {
+                        cut.set_bit(node, true);
                     }
+                    min_dis = min(min_dis, adj_d);
                 }else {
                     min_dis = min(min_dis, dis[adj as usize]);
                 }
             }
+
             
             if p == 1 {
                 cut.set_bit(node, num_children > 1);
@@ -221,14 +223,22 @@ impl Board {
             curr_height -= 1;
         }
 
+        let mut heights = [0i32;6];
+        for i in 0..6{
+            heights[i] = self.height(neighbors[i]);
+            if neighbors[i] == origin {
+                heights[i] -= 1;
+            }
+        }
+
         for i in 0..6 {
             let prev = (i + 5)%6;
             let next = (i + 1)%6;
 
-            let max_height = max(curr_height, self.height(neighbors[i]));
-            let min_height = min(self.height(neighbors[prev]), self.height(neighbors[next]));
+            let max_height = max(curr_height, heights[i]);
+            let min_height = min(heights[prev], heights[next]);
 
-            if max_height >= min_height {
+            if max_height >= min_height && (curr_height > 0 || heights[prev] + heights[i] + heights[next] > 0) {
                 moves.push(directions[i]);
             }
 
@@ -315,7 +325,7 @@ impl Board {
     fn generate_ant(&self, origin: Tile, moves : &mut ActionContainer) {
 
         let mut vis = TileBitmask::new(false);
-        vis.set_bit(origin, false);
+        vis.set_bit(origin, true);
 
         let mut queue: VecDeque<Tile> = VecDeque::new();
         queue.push_back(origin);
@@ -327,6 +337,7 @@ impl Board {
                 if !vis.is_on(tile + *dir) {
                     moves.push(Move(origin, tile + *dir));
                     vis.set_bit(tile + *dir, true);
+                    queue.push_back(tile + *dir);
                 }
             }
 
@@ -335,7 +346,9 @@ impl Board {
     }
     
     fn generate_pillbug(&self, cut_vertices: &TileBitmask, origin: Tile, moves : &mut ActionContainer){
-        self.generate_walk1(origin, moves);
+        if !cut_vertices.is_on(origin) {
+            self.generate_walk1(origin, moves);
+        }
 
         for start in adjacent(origin) {
             for end in adjacent(origin) {
@@ -358,6 +371,14 @@ impl Board {
             if self.tile(adj).is_some() {
                 adjacent_pieces[self.tile(adj).ptype().index()] = true;
             }
+        }
+
+        if adjacent_pieces[PieceType::Pillbug.index()] {
+            self.generate_pillbug(cut_vertices, origin, moves);
+        }
+
+        if cut_vertices.is_on(origin) {
+            return;
         }
 
         if adjacent_pieces[PieceType::Ant.index()] {
@@ -383,9 +404,6 @@ impl Board {
             self.generate_ladybug(origin, moves);
         }
 
-        if adjacent_pieces[PieceType::Pillbug.index()] {
-            self.generate_pillbug(cut_vertices, origin, moves);
-        }
     }
 
     pub fn generate_moves(&mut self) -> Vec<Action> {
@@ -411,17 +429,25 @@ impl Board {
             if Some(tile) == stunned {
                 continue;
             }
-
-            match self.tile(*tile).ptype() {
-                PieceType::Queen => self.generate_walk1(*tile, &mut moves),
-                PieceType::Grasshopper => self.generate_grasshopper(*tile, &mut moves),
-                PieceType::Spider => self.generate_spider(*tile, &mut moves),
-                PieceType::Ant => self.generate_ant(*tile, &mut moves),
-                PieceType::Beetle => self.generate_beetle(*tile, &mut moves),
-                PieceType::Mosquito => self.generate_mosquito(&cut_vertices, *tile, &mut moves),
-                PieceType::Ladybug => self.generate_ladybug(*tile, &mut moves),
-                PieceType::Pillbug => self.generate_pillbug(&cut_vertices, *tile, &mut moves)
-            };
+            
+            if !cut_vertices.is_on(*tile){
+                match self.tile(*tile).ptype() {
+                    PieceType::Queen => self.generate_walk1(*tile, &mut moves),
+                    PieceType::Grasshopper => self.generate_grasshopper(*tile, &mut moves),
+                    PieceType::Spider => self.generate_spider(*tile, &mut moves),
+                    PieceType::Ant => self.generate_ant(*tile, &mut moves),
+                    PieceType::Beetle => self.generate_beetle(*tile, &mut moves),
+                    PieceType::Mosquito => self.generate_mosquito(&cut_vertices, *tile, &mut moves),
+                    PieceType::Ladybug => self.generate_ladybug(*tile, &mut moves),
+                    PieceType::Pillbug => self.generate_pillbug(&cut_vertices, *tile, &mut moves)
+                };
+            }
+            else if self.tile(*tile).ptype() == PieceType::Mosquito {
+                self.generate_mosquito(&cut_vertices, *tile, &mut moves);
+            }
+            else if self.tile(*tile).ptype() == PieceType::Pillbug {
+                self.generate_pillbug(&cut_vertices, *tile, &mut moves);
+            }
         }
 
         moves.moves
