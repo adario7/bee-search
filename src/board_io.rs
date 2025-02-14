@@ -1,7 +1,7 @@
 use std::option;
 
 use crate::uhp::{UhpError, UhpResult};
-use crate::tile::{Direction, Tile, TILE_ZERO};
+use crate::tile::{Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::piece_type::{Pct, PieceType};
 use crate::piece::{Color, Piece};
 use crate::board::{Action, Board, GameResult};
@@ -74,7 +74,7 @@ impl Board {
         self.piece_name(self.make_next_piece(pct), out)
     }
 
-    fn tile_name(&self, tile: Tile, out: &mut String) {
+    fn tile_name(&self, origin: Tile, tile: Tile, out: &mut String) {
         let piece = self.tile(tile);    
         if piece.is_some() {
             self.piece_name(piece, out);
@@ -82,7 +82,7 @@ impl Board {
         }
         for dir in Direction::all() {
             let adj = self.tile(tile + *dir);
-            if adj.is_some() {
+            if adj.is_some() && tile + *dir != origin {
                 out.push_str(dir.opposite().prefix_name());
                 self.piece_name(adj, out);
                 out.push_str(dir.opposite().suffix_name());
@@ -106,8 +106,8 @@ impl Board {
         out.push(' ');
 
         match m {
-            Action::Move(_, end) => self.tile_name(end, &mut out),
-            Action::Place(tile, _) => self.tile_name(tile, &mut out),
+            Action::Move(start, end) => self.tile_name(start, end, &mut out),
+            Action::Place(tile, _) => self.tile_name((GRID_SIZE + 1) as Tile, tile, &mut out), //TODO obrobrioso
             Action::Pass => unreachable!(),
         }
         out
@@ -167,7 +167,7 @@ impl Board {
 // board input parsing
 impl Board {
     fn parse_game_type(game_type: &str) -> UhpResult<Self> {
-        let mut options = game_type.split(':');
+        let mut options = game_type.split('+');
         
         if options.next() != Some("Base") { // TODO: add support for other game types
             return Err(UhpError::InvalidGameType(game_type.to_owned()));
