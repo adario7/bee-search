@@ -167,26 +167,25 @@ impl Board {
     fn parse_game_type(game_type: &str) -> UhpResult<Self> {
         let mut options = game_type.split('+');
         
-        if options.next() != Some("Base") { // TODO: add support for other game types
+        if options.next() != Some("Base") {
             return Err(UhpError::InvalidGameType(game_type.to_owned()));
         }
 
         let str = options.next().unwrap_or("");
-        let mut M = 0u8;
-        let mut L = 0u8;
-        let mut P = 0u8;
-
+        let mut m = 0u8;
+        let mut l = 0u8;
+        let mut p = 0u8;
         if str.contains('M') {
-            M = 1u8;
+            m = 1u8;
         }
         if str.contains('L') {
-            L = 1u8;
+            l = 1u8;
         }
         if str.contains('P') {
-            P = 1u8;
+            p = 1u8;
         }
 
-        Ok(Board::new_mlp(M, L, P))
+        Ok(Board::new_mlp(m, l, p))
     }
 
     // parses piece descrption -> (piece, direction), e.g. "wB2-" -> ((White, Beetle, 2), NW)

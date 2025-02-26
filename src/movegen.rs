@@ -1,13 +1,12 @@
-use core::num;
 use std::cmp::{min, max};
 use lazy_static::lazy_static;
 use std::collections::VecDeque;
 
 use crate::abstractions::{TileBitmask, ActionContainer};
 use crate::board::{Action, Board};
-use crate::piece::{self, Color, Piece};
+use crate::piece::{Color, Piece};
 use crate::piece_type::PieceType;
-use crate::tile::{self, adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO};
+use crate::tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::movegen::Action::{Place, Move};
 
 // precomputation of slidable directions for every possible neighborhood configuration
@@ -290,7 +289,7 @@ impl Board {
 
             if self.tile(next).is_some() {
 
-                while(self.tile(next).is_some()) {
+                while self.tile(next).is_some() {
                     next = next + *dir;
                 }
 

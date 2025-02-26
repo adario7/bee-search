@@ -59,21 +59,21 @@ impl Board {
         }
     }
 
-    pub fn new_mlp(M: u8, L: u8, P: u8) -> Self {
+    pub fn new_mlp(m: u8, l: u8, p: u8) -> Self {
         Board {
-            gametype: format!(
-                "Base{}",
-                if M + L + P > 0 {
+            gametype: format!("Base{}",
+                if m + l + p > 0 {
                     format!("+{}{}{}",
-                        if M > 0 {"M"} else {""},
-                        if L > 0 {"L"} else {""},
-                        if P > 0 {"P"} else {""},
+                        if m > 0 {"M"} else {""},
+                        if l > 0 {"L"} else {""},
+                        if p > 0 {"P"} else {""},
                     )
-                }else {"".to_string()}
-            ),
+                } else {
+                    "".to_string()
+                }),
             world: [Piece::empty(); GRID_SIZE],
             underworld: HashMap::new(),
-            placeable: [[1, 3, 2, 3, 2, M, L, P], [1, 3, 2, 3, 2, M, L, P]], //TODO: doesn't consider values of TOT_QTY
+            placeable: [[1, 3, 2, 3, 2, m, l, p], [1, 3, 2, 3, 2, m, l, p]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
             occupied_tiles: [Vec::new(), Vec::new()],
             turn_num: 0,
