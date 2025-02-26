@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::tile::{adjacent, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
@@ -16,8 +16,7 @@ pub enum Action {
 #[derive(Debug, Eq, PartialEq)]
 pub enum GameResult {
     InProgress,
-    WhiteWins,
-    BlackWins,
+    Winner(Color),
     Draw
 }
 
@@ -148,8 +147,9 @@ impl Board {
     fn do_move(&mut self, from: Tile, to: Tile) {
         let piece = self.world[from as usize];
         debug_assert!(piece.is_some());
-        self.add_piece(to, piece);
+        debug_assert_ne!(from, to);
         self.remove_piece(from);
+        self.add_piece(to, piece);
     }
 
     pub fn make_next_piece(&self, pct: PieceType) -> Piece {
@@ -199,8 +199,8 @@ impl Board {
         let sb = self.queen_surround(Color::Black);
         match (sw, sb) {
             (6, 6) => GameResult::Draw,
-            (6, _) => GameResult::BlackWins,
-            (_, 6) => GameResult::WhiteWins,
+            (6, _) => GameResult::Winner(Color::Black),
+            (_, 6) => GameResult::Winner(Color::White),
             (_, _) => GameResult::InProgress,
         }
     }
@@ -245,7 +245,7 @@ mod test {
             board.do_action(Action::Place(b + d, pct));
             println!("{} {:?} {:?}", board.turn_num, d, pct);
             if board.turn_num == 1+6*2 {
-                assert_eq!(board.game_result(), GameResult::WhiteWins);
+                assert_eq!(board.game_result(), GameResult::Winner(Color::White));
             } else {
                 assert_eq!(board.game_result(), GameResult::InProgress);
             }
@@ -253,6 +253,6 @@ mod test {
         }
         assert_eq!(board.game_result(), GameResult::Draw);
         board.do_action(Action::Move(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
-        assert_eq!(board.game_result(), GameResult::BlackWins);
+        assert_eq!(board.game_result(), GameResult::Winner(Color::Black));
     }
 }

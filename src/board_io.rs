@@ -1,5 +1,3 @@
-use std::option;
-
 use crate::uhp::{UhpError, UhpResult};
 use crate::tile::{Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::piece_type::{Pct, PieceType};
@@ -119,8 +117,8 @@ impl Board {
         }
         match self.game_result() {
             GameResult::InProgress => "InProgress",
-            GameResult::WhiteWins => "WhiteWins",
-            GameResult::BlackWins => "BlackWins",
+            GameResult::Winner(Color::White) => "WhiteWins",
+            GameResult::Winner(Color::Black) => "BlackWins",
             GameResult::Draw => "Draw",
         }
     }

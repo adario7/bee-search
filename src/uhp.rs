@@ -135,6 +135,12 @@ impl Uhp {
         Ok(())
     }
 
+    fn eval(&mut self, _args: &str) -> UhpResult<()> {
+        let eval = self.board.static_eval();
+        println!("{}", eval);
+        Ok(())
+    }
+
     // https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol#engine-commands
     fn command(&mut self, line: &str) {
         let line = line.trim();
@@ -150,7 +156,9 @@ impl Uhp {
             "bestmove" => self.best_move(args),
             "undo" => self.undo(args),
             "options" => self.options(args),
+            // secret commands
             "perft" => self.perft(args),
+            "eval" => self.eval(args),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };
         if let Err(err) = result {
