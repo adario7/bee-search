@@ -117,6 +117,7 @@ impl Board {
         let curr = &mut self.world[tile as usize];
         if curr.is_some() {
             self.underworld.entry(tile).or_insert_with(Vec::new).push(*curr);
+            Self::remove_occupancy(&mut self.occupied_tiles, *curr, tile);
         }
         *curr = piece;
         Self::add_occupancy(&mut self.occupied_tiles, *curr, tile);
