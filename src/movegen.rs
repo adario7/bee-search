@@ -447,6 +447,9 @@ impl Board {
             else if self.tile(*tile).ptype() == PieceType::Pillbug {
                 self.generate_pillbug(&cut_vertices, *tile, &mut moves);
             }
+            else if self.tile(*tile).ptype() == PieceType::Beetle && self.height(*tile) > 1 {
+                self.generate_beetle(*tile, &mut moves);
+            }
         }
 
         moves.moves
