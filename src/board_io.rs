@@ -85,6 +85,15 @@ impl Board {
                 self.piece_name(adj, out);
                 out.push_str(dir.opposite().suffix_name());
                 return;
+            }else if adj.is_some() && self.height(origin) > 1 {
+                out.push_str(dir.opposite().prefix_name());
+                if let Some(under_pieces) = self.underworld.get(&(tile + *dir)) {
+                    if let Some(piece) = under_pieces.last() {
+                        self.piece_name(*piece, out);
+                    }
+                }
+                out.push_str(dir.opposite().suffix_name());
+                return;
             }
         }
         out.push_str("??");
@@ -124,7 +133,7 @@ impl Board {
     }
 
     fn turn_string(&self) -> String {
-        format!("{:?}[{}]", self.color().name(), self.turn_history.len() / 2 + 1)
+        format!("{}[{}]", self.color().name(), self.turn_history.len() / 2 + 1)
     }
 
 
@@ -207,7 +216,7 @@ impl Board {
     fn find_piece(&self, piece: Piece) -> Option<Tile> {
         self.occupied_tiles.iter()
             .flat_map(|v| v.iter()).copied()
-            .find(|&t| self.tile(t) == piece)
+            .find(|&t| self.tile(t) == piece || self.underworld.get(&t).unwrap_or(&Vec::new()).contains(&piece))
     }
 
     fn parse_tile(&self, s: &str) -> Option<Tile> {
