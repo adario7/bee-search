@@ -63,7 +63,7 @@ impl Engine {
     }
 
     fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> Action {
-        let mut incumbent = *board.generate_moves().first().unwrap();
+        let mut incumbent = *board.generate_moves().first().unwrap_or(&Action::Pass);
         for depth in 1..=max_depth {
             let opt = self.minimax(board, 0, depth, -INF, INF);
             if let Some((score, Some(mv))) = opt {
