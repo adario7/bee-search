@@ -1,0 +1,38 @@
+[GameType "Base+MLP"]
+[Date "2025.03.11"]
+[Event ""]
+[Site ""]
+[Round ""]
+[White "bee-search 0.1"]
+[Black "alessandro"]
+[Result "WhiteWins"]
+
+1. wG1
+2. bS1 wG1/
+3. wQ wG1\
+4. bQ \bS1
+5. wQ bS1\
+6. bA1 \bQ
+7. wG1 bS1/
+8. bA1 wQ\
+9. wA1 wG1/
+10. bA2 bA1\
+11. wA1 -bQ
+12. bB1 bA2/
+13. wA2 wG1/
+14. bA2 wA2/
+15. wB1 \wA1
+16. bB1 bA1/
+17. wB1 \bQ
+18. bB1 wQ
+19. wG2 -wB1
+20. bS2 /bS1
+21. wG2 wA1\
+22. bA1 wG1\
+23. wL \wB1
+24. bA1 \wL
+25. wM wB1/
+26. bA2 wM/
+27. wA2 wM\
+
+WhiteWins

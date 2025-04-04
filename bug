@@ -1,0 +1,15 @@
+Base+MLP;InProgress;"White"[17];wS1;bP -wS1;wB1 wS1/;bL -bP;wQ wB1\;bM -bL;wA1 wS1\;bQ -bM;wA1 -bQ;bB1 bM\;wB1 \wS1;bB1 bL\;wB1 bP;bB1 bM\;wM \wA1;bB1 bL\;wM \bM;bB1 bM\;wL -wA1;bB1 bL\;wL bQ\;bB1 bM\;wB2 \wA1;bM /wB2;wB2 -wM;bM wQ-;wG1 wM/;bM wQ\;wG1 wA1\;bM wS1\;wP wM/;bM wQ/
+
+pillbug si muove di due
+beetle non può muoversi
+
+
+
+
+---
+
+
+Base+MLP;InProgress;"White"[19];wS1;bG1 \wS1;wA1 /wS1;bG2 bG1/;wQ wS1\;bS1 -bG1;wA1 bG2/;bQ /bS1;wA1 /bQ;bA1 -bG2;wA2 wQ/;bA1 wA2-;wA3 wQ\;bA1 /wQ;wA2 -bS1;bA1 wA3\;wG1 \wA2;bA2 \bG2;wG1 bQ\;bA2 /wQ;wL wA1\;bA3 \bG2;wL bS1\;bS1 -wA2;wB1 wA2/;bA3 wA3/;wB1 -bG1;bB1 bA3/;wM \wB1;bS1 wM/;wB2 -wA2;bA2 -wB2;wP -wA1;bA2 /wB2;wB2 wA2;bG3 \bG2
+
+play wB2 /wA2
+invalidmove wB2 /wA2

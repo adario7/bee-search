@@ -79,7 +79,7 @@ impl Board {
             turn_history: Vec::new(),
             tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
             zobrist_table,
-            zobrist_hash: 0,
+            zobrist_hash: 1,
             zobrist_history: Vec::new(),
         }
     }

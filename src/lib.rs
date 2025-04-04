@@ -9,3 +9,4 @@ pub mod abstractions;
 pub mod perft;
 pub mod eval;
 pub mod engine;
+pub mod tt;

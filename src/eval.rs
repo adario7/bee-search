@@ -1,6 +1,7 @@
 use crate::{board::Board, tile::adjacent};
 
 pub type Eval = i16;
+pub type Value = Eval;
 
 impl Board {
     fn queen_score(&self) -> Eval {
