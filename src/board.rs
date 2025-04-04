@@ -1,9 +1,16 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::default::Default;
+use std::hash::Hasher;
 
 use crate::tile::{adjacent, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
 use crate::piece_type::{Pct, PieceType};
 use crate::abstractions::*;
+use std::sync::OnceLock;
+
+static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
+static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -40,12 +47,27 @@ pub struct Board {
     // placeable tiles for both players
     // a tile is placeable for a player if he can put a piece that is not present on the board on it
     pub tiles_placeable: [TileBitmask; 2],
+
+    pub zobrist_table: &'static [u64; GRID_SIZE * 2],
+    pub zobrist_hash: u64,
+    pub zobrist_history: Vec<u64>,
 }
 
 const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
 
 impl Board {
     pub fn new() -> Self {
+
+        let zobrist_table = ZOBRIST_TABLE.get_or_init(|| {
+            let mut table = [0u64; GRID_SIZE * 2];
+            let mut hasher = DefaultHasher::new();
+            for (i, entry) in table.iter_mut().enumerate() {
+                hasher.write_usize(i);
+                *entry = hasher.finish();
+            }
+            table
+        });
+
         Board {
             gametype: "Base+MLP".to_string(),
             world: [Piece::empty(); GRID_SIZE],
@@ -56,10 +78,24 @@ impl Board {
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
+            zobrist_table,
+            zobrist_hash: 0,
+            zobrist_history: Vec::new(),
         }
     }
 
     pub fn new_mlp(m: u8, l: u8, p: u8) -> Self {
+
+        let zobrist_table = ZOBRIST_TABLE.get_or_init(|| {
+            let mut table = [0u64; GRID_SIZE * 2];
+            let mut hasher = DefaultHasher::new();
+            for (i, entry) in table.iter_mut().enumerate() {
+                hasher.write_usize(i);
+                *entry = hasher.finish();
+            }
+            table
+        });
+
         Board {
             gametype: format!("Base{}",
                 if m + l + p > 0 {
@@ -79,6 +115,9 @@ impl Board {
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
+            zobrist_table,
+            zobrist_hash: 0,
+            zobrist_history: Vec::new(),
         }
     }
 
@@ -100,6 +139,11 @@ impl Board {
         }
         return (self.world[tile as usize] != Piece::empty()) as i32;
     } 
+
+    fn zobrist(&self, t: Tile, p: Piece, h: u32) -> u64 {
+        let hash = self.zobrist_table[((t as usize) << 1) | (p.color() as usize)];
+        hash.rotate_left((h<<3) | (p.ptype() as u32))
+    }
 
     fn add_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
@@ -124,11 +168,17 @@ impl Board {
         if piece.ptype() == Pct::Queen {
             self.queens[piece.color().index()] = Some(tile);
         }
+
+        self.zobrist_hash ^= self.zobrist(tile, piece, self.height(tile) as u32);
     }
 
     fn remove_piece(&mut self, tile: Tile) {
+        
+        self.zobrist_hash ^= self.zobrist(tile, self.world[tile as usize], self.height(tile) as u32);
+
         let curr = &mut self.world[tile as usize];
         debug_assert!(curr.is_some());
+
         if curr.ptype() == Pct::Queen {
             self.queens[curr.color().index()] = None;
         }
@@ -172,11 +222,17 @@ impl Board {
         }
         self.turn_num += 1;
         self.turn_history.push(action);
+
+        self.zobrist_hash ^= PLAYER_HASH;
+        self.zobrist_history.push(self.zobrist_hash);
     }
 
     pub fn undo_action(&mut self) {
         let action = self.turn_history.pop().unwrap();
         self.turn_num -= 1;
+
+        self.zobrist_hash ^= PLAYER_HASH;
+        self.zobrist_history.pop();
         match action {
             Action::Place(tile, piece_type) => {
                 debug_assert!(self.world[tile as usize].ptype() == piece_type);
@@ -209,8 +265,10 @@ impl Board {
 
 #[cfg(test)]
 mod test {
+    use rand::Rng;
     use super::*;
     use crate::tile::{Direction, TILE_ZERO};
+    use indicatif::ProgressBar;
 
     #[test]
     fn test_board_do_undo() {
@@ -255,5 +313,125 @@ mod test {
         assert_eq!(board.game_result(), GameResult::Draw);
         board.do_action(Action::Move(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
         assert_eq!(board.game_result(), GameResult::Winner(Color::Black));
+    }
+
+    fn compare_boards(b1: &mut Board, b2: &mut Board) -> bool {
+        for i in 0..2 {
+            for tile in b1.occupied_tiles[i].iter() {
+                if b1.height(*tile) != b2.height(*tile){
+                    return false;
+                }
+
+                if let Some(vec1) = b1.underworld.get(&tile) {
+                    if let Some(vec2) = b2.underworld.get(&tile){
+                        for j in 0..vec1.len() {
+                            if vec1[j] != vec2[j] {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                
+                if b1.world[*tile as usize] != b2.world[*tile as usize] {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_zobrist_hash() {
+        //Non riesce a testare permutazioni di pedine sulla stessa casella in base all'altezza, in teoria dovrebbe essere diverso
+
+        let mut b1 = Board::new();
+        let mut b2 = Board::new();
+
+        let depth = 50;
+        let num_runs = 1000;
+        let num_tries = 100;
+        let mut bar = ProgressBar::new(num_runs);
+
+        let mut rng = rand::rng();
+
+        for _run in 0..num_runs {
+            bar.inc(1);
+            for _turn in 0..depth {
+
+                if b1.game_result() != GameResult::InProgress {
+                    break;
+                }
+
+                let moves = b1.generate_moves();
+
+                if moves.len() > 0 {
+                    
+                    for _i in 0..num_tries {
+                        let m1 = rng.random_range(0..moves.len());
+                        let m2 = rng.random_range(0..moves.len());
+
+                        b1.do_action(moves[m1]);
+                        b2.do_action(moves[m2]);
+                        
+                        assert_eq!(compare_boards(&mut b1, &mut b2), b1.zobrist_hash == b2.zobrist_hash);
+
+                        b1.undo_action();
+                        b2.undo_action();
+                    }
+
+                    let mov = rng.random_range(0..moves.len());
+                    b1.do_action(moves[mov]);
+                    b2.do_action(moves[mov]);
+                }else {
+                    b1.do_action(Action::Pass);
+                    b2.do_action(Action::Pass);
+                }
+                assert!(compare_boards(&mut b1, &mut b2));
+                assert!(b1.zobrist_hash == b2.zobrist_hash);
+            }
+
+            while b1.turn_num > 0 {
+                b1.undo_action();
+                b2.undo_action();
+                assert!(compare_boards(&mut b1, &mut b2));
+                assert!(b1.zobrist_hash == b2.zobrist_hash);
+            }
+        }
+
+        let num_runs2 = 1000;
+        let depth2 = 200;
+
+        bar = ProgressBar::new(num_runs2);
+        for _run in 0..num_runs2 {
+            bar.inc(1);
+            for _turn in 0..depth2 {
+                if b1.game_result() != GameResult::InProgress || b2.game_result() != GameResult::InProgress {
+                    break;
+                }
+
+                let moves1 = b1.generate_moves();
+                if moves1.len() > 0 {
+                    let mov1 = rng.random_range(0..moves1.len());
+                    b1.do_action(moves1[mov1]);
+                }else {
+                    b1.do_action(Action::Pass);
+                }
+                let moves2 = b2.generate_moves();
+                if moves2.len() > 0 {
+                    let mov2 = rng.random_range(0..moves2.len());
+                    b2.do_action(moves2[mov2]);
+                }else {
+                    b2.do_action(Action::Pass);
+                }
+                assert_eq!(compare_boards(&mut b1, &mut b2), b1.zobrist_hash == b2.zobrist_hash);
+            }
+
+            while b1.turn_num > 0 {
+                b1.undo_action();
+            }
+            while b2.turn_num > 0 {
+                b2.undo_action();
+            }
+        }
     }
 }
