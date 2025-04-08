@@ -118,4 +118,8 @@ impl Engine {
         self.deadline = Instant::now() + max_time;
         self.iterative_deepening(board, max_depth)
     }
+
+    pub fn clear_tt(&mut self) {
+        self.tt.clear();
+    }
 }

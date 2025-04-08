@@ -1,7 +1,8 @@
 use crate::{board::Action, engine::Depth, eval::{Eval, Value}};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TTFlag {
+    #[default]
     Null = 0,
     LowerBound = 1,
     UpperBound = 2,
@@ -9,7 +10,7 @@ pub enum TTFlag {
 }
 
 //#[repr(packed)] TODO: test consequences of this
-#[derive(Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct TEntry {
     pub hash: u64,
     pub pv: Action,
@@ -26,14 +27,7 @@ pub struct TTable {
 impl TTable {
     pub fn new(size: usize) -> Self {
         Self {
-            buf: vec![TEntry {
-                hash: 0,
-                pv: Action::Pass,
-                value: 0,
-                eval: 0,
-                depth: 0,
-                flag: TTFlag::Null,
-            }; size],
+            buf: vec![Default::default(); size],
         }
     }
 
@@ -70,6 +64,12 @@ impl TTable {
         // if there is no collising keep the deepest entry
         if self.buf[idx].hash != entry.hash || entry.depth > self.buf[idx].depth {
             self.buf[idx] = entry;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for entry in &mut self.buf {
+            *entry = Default::default();
         }
     }
 }
