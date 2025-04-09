@@ -11,15 +11,15 @@ use bee_search::engine::{Engine, Depth}; //
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Skip the first s moves
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 10)]
     skip: u32,
 
     /// Number of moves to simulate
-    #[arg(short, long, default_value_t = 40)]
+    #[arg(short, long, default_value_t = 20)]
     n: u32,
 
     /// Engine search depth
-    #[arg(short, long, default_value_t = 3)]
+    #[arg(short, long, default_value_t = 4)]
     d: Depth,
 
     /// Clear transposition table at each move

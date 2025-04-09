@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, tt::{TTFlag, TTable}};
+use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, tile::Direction, tt::{TTFlag, TTable}};
 use std::{cmp::Ordering, time::{Duration, Instant}};
 
 pub type Depth = u8;
@@ -39,13 +39,39 @@ impl Engine {
         }
     }
 
+    fn attacks_queen(board: &Board, action: &Action) -> bool {
+        if let Action::Move(_, to) = action {
+            let queen = board.queens[board.color().other() as usize];
+            if let Some(target) = queen {
+                if *to == target {
+                    return true;
+                }
+                for d in Direction::all() {
+                    if *to + *d == target {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn ordered_moves(&self, board: &mut Board, pv: Option<Action>) -> Vec<Action> {
         let pv = pv.unwrap_or(Action::Pass);
         let mut moves = board.generate_moves();
         moves.sort_by(|a, b| {
+            // 1) PV
             if *a == pv {
                 return Ordering::Less;
             } else if *b == pv {
+                return Ordering::Greater;
+            }
+            // 2) attacks on the queen
+            let a_attacks = Self::attacks_queen(board, a);
+            let b_attacks = Self::attacks_queen(board, b);
+            if a_attacks && !b_attacks {
+                return Ordering::Less;
+            } else if !a_attacks && b_attacks {
                 return Ordering::Greater;
             }
             return Ordering::Equal
