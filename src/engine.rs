@@ -1,5 +1,5 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, tile::Direction, tt::{TTFlag, TTable}};
-use std::{cmp::Ordering, time::{Duration, Instant}};
+use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::{Direction, GRID_SIZE}, tt::{TTFlag, TTable}};
+use std::{cmp::Ordering, time::{Duration, Instant}, u64, usize};
 
 pub type Depth = u8;
 const INF: Eval = 32500;
@@ -12,7 +12,15 @@ fn mate_in(ply: Depth) -> Eval {
 pub struct Engine {
     tt: TTable,
     nnodes: u64,
-    deadline: Instant
+    deadline: Instant,
+    // indexed by color, (from or piece type), to; pass is last entry
+    history_h: Vec<i64>
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoveInfo {
+    mv: Action,
+    quiet: bool,
 }
 
 impl Engine {
@@ -21,6 +29,19 @@ impl Engine {
             nnodes: 0,
             deadline: Instant::now(),
             tt: TTable::new(1 << 24), // TODO: make this configurable
+            history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+        }
+    }
+
+    fn hist_index(c: Color, mv: Action) -> usize {
+        let ci = c as usize * (GRID_SIZE + PCT_COUNT) * GRID_SIZE;
+        match mv {
+            Action::Place(pct, to)
+                => ci + to as usize * (GRID_SIZE + PCT_COUNT) + GRID_SIZE + pct as usize,
+            Action::Move(from, to)
+                => ci + to as usize * (GRID_SIZE + PCT_COUNT) + from as usize,
+            Action::Pass
+                => 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE
         }
     }
 
@@ -39,42 +60,46 @@ impl Engine {
         }
     }
 
-    fn attacks_queen(board: &Board, action: &Action) -> bool {
+    // a move is quiet if it does not attack the opponent's queen
+    fn is_quiet(board: &Board, action: &Action) -> bool {
         if let Action::Move(_, to) = action {
             let queen = board.queens[board.color().other() as usize];
             if let Some(target) = queen {
                 if *to == target {
-                    return true;
+                    return false;
                 }
                 for d in Direction::all() {
                     if *to + *d == target {
-                        return true;
+                        return false;
                     }
                 }
             }
         }
-        false
+        true
     }
 
-    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>) -> Vec<Action> {
+    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
-        let mut moves = board.generate_moves();
+        let mut moves = board.generate_moves().into_iter()
+            .map(|mv| MoveInfo { mv, quiet: Self::is_quiet(board, &mv) })
+            .collect::<Vec<_>>();
         moves.sort_by(|a, b| {
             // 1) PV
-            if *a == pv {
+            if a.mv == pv {
                 return Ordering::Less;
-            } else if *b == pv {
+            } else if b.mv == pv {
                 return Ordering::Greater;
             }
             // 2) attacks on the queen
-            let a_attacks = Self::attacks_queen(board, a);
-            let b_attacks = Self::attacks_queen(board, b);
-            if a_attacks && !b_attacks {
+            if !a.quiet && b.quiet {
                 return Ordering::Less;
-            } else if !a_attacks && b_attacks {
+            } else if a.quiet && !b.quiet {
                 return Ordering::Greater;
             }
-            return Ordering::Equal
+            // 3) history heuristic
+            let ha = self.history_h[Self::hist_index(board.color(), a.mv)];
+            let hb = self.history_h[Self::hist_index(board.color(), b.mv)];
+            return hb.cmp(&ha);
         });
         moves
     }
@@ -117,25 +142,48 @@ impl Engine {
         }
 
         let mut alpha = alpha0;
-        let mut best_move: Option<(Value, Action)> = None;
+        let mut best_move: Option<(Value, MoveInfo)> = None;
         let moves = self.ordered_moves(board, pv);
-        for mv in moves {
+        let mut explored_quiet = 0;
+        for mvi in moves.iter() {
+            let mv = mvi.mv;
             board.do_action(mv);
             let opt = self.minimax(board, ply + 1, depth - 1, -beta, -alpha);
             board.undo_action();
             let value = opt?;
             let value = -value;
             if best_move.is_none_or(|(v, _)| value > v) {
-                best_move = Some((value, mv));
+                best_move = Some((value, *mvi));
             }
             alpha = alpha.max(value);
+            if mvi.quiet {
+                explored_quiet += 1;
+            }
             if alpha >= beta {
                 break;
             }
         }
 
-        if let Some((value, mv)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mv, value, eval, depth);
+        // update history heuristic
+        if let Some((_, mvi)) = best_move {
+            let mv = mvi.mv;
+            if alpha >= beta && mvi.quiet && Some(mv) != pv {
+                let bonus = depth as i64 * depth as i64;
+                self.history_h[Self::hist_index(board.color(), mv)] += bonus;
+                for prev in moves.iter() {
+                    if prev.mv == mv {
+                        break;
+                    }
+                    if prev.quiet {
+                        self.history_h[Self::hist_index(board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
+                    }
+                }
+            }
+        }
+
+        // update transposition table
+        if let Some((value, mvi)) = best_move {
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, depth);
         }
 
         best_move.map(|(value, _)| value)
@@ -150,7 +198,7 @@ impl Engine {
             let elapsed = start.elapsed();
             if score.is_none() {
                 eprintln!("depth {}: ran out of time", depth);
-                continue;
+                break;
             }
             if let Some(entry) = option {
                 incumbent = entry.pv;

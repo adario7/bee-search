@@ -1,5 +1,7 @@
 use modular_bitfield::prelude::*;
 
+pub const PCT_COUNT: usize = 8;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[derive(BitfieldSpecifier)]
 pub enum PieceType {
