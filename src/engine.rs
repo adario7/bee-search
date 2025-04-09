@@ -1,5 +1,5 @@
 use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, tt::{TTFlag, TTable}};
-use std::time::{Duration, Instant};
+use std::{cmp::Ordering, time::{Duration, Instant}};
 
 pub type Depth = u8;
 const INF: Eval = 32500;
@@ -24,8 +24,36 @@ impl Engine {
         }
     }
 
+    fn terminal_score(&self, board: &Board, ply: Depth) -> Option<Value> {
+        let result = board.game_result();
+        match result {
+            GameResult::InProgress => None,
+            GameResult::Draw => Some(0),
+            GameResult::Winner(color) => {
+                if color == board.color() {
+                    Some(mate_in(ply))
+                } else {
+                    Some(-mate_in(ply))
+                }
+            }
+        }
+    }
 
-    fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value) -> Option<Eval> {
+    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>) -> Vec<Action> {
+        let pv = pv.unwrap_or(Action::Pass);
+        let mut moves = board.generate_moves();
+        moves.sort_by(|a, b| {
+            if *a == pv {
+                return Ordering::Less;
+            } else if *b == pv {
+                return Ordering::Greater;
+            }
+            return Ordering::Equal
+        });
+        moves
+    }
+
+    fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value) -> Option<Value> {
         // out of time case
         if Instant::now() > self.deadline {
             return None;
@@ -33,19 +61,13 @@ impl Engine {
         self.nnodes += 1;
 
         // terminal poisiton case
-        let result = board.game_result();
-        if result == GameResult::Draw {
-            return Some(0);
-        } else if let GameResult::Winner(color) = result {
-            return if color == board.color() {
-                Some(mate_in(ply))
-            } else {
-                Some(-mate_in(ply))
-            };
+        let terminal_score = self.terminal_score(board, ply);
+        if terminal_score.is_some() {
+            return terminal_score;
         }
 
         let entry = self.tt.get(board.zobrist_hash);
-        //let pv = entry.map(|e| e.pv); // use the PV even if below depth
+        let pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
             if entry.depth >= depth {
                 // improve out bound
@@ -70,7 +92,8 @@ impl Engine {
 
         let mut alpha = alpha0;
         let mut best_move: Option<(Value, Action)> = None;
-        for mv in board.generate_moves() {
+        let moves = self.ordered_moves(board, pv);
+        for mv in moves {
             board.do_action(mv);
             let opt = self.minimax(board, ply + 1, depth - 1, -beta, -alpha);
             board.undo_action();
@@ -121,5 +144,9 @@ impl Engine {
 
     pub fn clear_tt(&mut self) {
         self.tt.clear();
+    }
+
+    pub fn last_nnodes(&self) -> u64 {
+        self.nnodes
     }
 }

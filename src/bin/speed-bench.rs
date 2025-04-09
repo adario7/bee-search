@@ -37,6 +37,7 @@ fn main() {
     let mut board = Board::new(); //
     let mut engine = Engine::new(); //
     let mut total_think_time = Duration::new(0, 0);
+    let mut total_nodes = 0;
     // Initialize seeded RNG for predictable random moves
     let mut rng = StdRng::seed_from_u64(args.s); // Uses the -s seed
 
@@ -71,16 +72,17 @@ fn main() {
             let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
             // This call is primarily for timing and exercising the engine/TT logic.
             // The engine's internal eprintln will still show computed best move info [cite: 117]
-            let _computed_best_action = engine.best_move(&mut board, args.d, max_time_per_move); // [cite: 120]
+            let _computed_best_action = engine.best_move(&mut board, args.d, max_time_per_move); 
             let think_time = start_time.elapsed();
             total_think_time += think_time;
+            total_nodes += engine.last_nnodes();
             pb.inc(1); // Increment progress bar
         }
         // ----------------------------------------------------------
 
 
         // --- Generate legal moves and play a random one ---
-        let mut legal_moves = board.generate_moves(); // [cite: 314]
+        let mut legal_moves = board.generate_moves(); 
         legal_moves.sort(); // Sort moves for consistent ordering
 
         let chosen_action = if legal_moves.is_empty() {
@@ -93,10 +95,11 @@ fn main() {
         pb.println(format!("Playing move: {:?}", chosen_action));
 
         // Apply the *randomly selected* move
-        board.do_action(chosen_action); // [cite: 42]
+        board.do_action(chosen_action); 
     }
 
     pb.finish_with_message("Simulation complete."); // Finish progress bar
 
+    println!("Total engine nodes: {}", total_nodes);
     println!("Total engine think time: {:.3} seconds", total_think_time.as_secs_f64());
 }
