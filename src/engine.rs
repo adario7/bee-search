@@ -104,6 +104,22 @@ impl Engine {
         moves
     }
 
+    // principal variation search
+    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, is_first_move: bool) -> Option<Value> {
+        if is_first_move{
+            // search the first move with the full window
+            self.minimax(board, nply, ndepth, -beta, -alpha).map(|v| -v)
+        } else {
+            // search the next moves with a null window to prove it is <= alpha
+            let mut score = -self.minimax(board, nply, ndepth, -(alpha+1), -alpha)?;
+            // if the null window search fails, search again with a full window
+            if score > alpha && beta - alpha > 1 {
+                score = -self.minimax(board, nply, ndepth, -beta, -alpha)?;
+            }
+            Some(score)
+        }
+    }
+
     fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value) -> Option<Value> {
         // out of time case
         if Instant::now() > self.deadline {
@@ -147,11 +163,11 @@ impl Engine {
         let mut explored_quiet = 0;
         for mvi in moves.iter() {
             let mv = mvi.mv;
+            let first_move = mv == moves[0].mv;
             board.do_action(mv);
-            let opt = self.minimax(board, ply + 1, depth - 1, -beta, -alpha);
+            let opt = self.pvs(board, ply + 1, depth - 1, alpha, beta, first_move);
             board.undo_action();
             let value = opt?;
-            let value = -value;
             if best_move.is_none_or(|(v, _)| value > v) {
                 best_move = Some((value, *mvi));
             }
