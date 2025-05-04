@@ -189,20 +189,42 @@ impl Engine {
         best_move.map(|(value, _)| value)
     }
 
+    fn aspiration_search(&mut self, board: &mut Board, depth: Depth) -> Option<Value> {
+        // guess the value of the search will be around the previous result
+        let guess = self.tt.get(board.zobrist_hash)
+            .map(|e| e.value);
+        const W: i64 = 70;
+        let mut alpha = guess.map(|v| v as i64 - W).unwrap_or(-INF as i64);
+        let mut beta = guess.map(|v| v as i64 + W).unwrap_or(INF as i64);
+        for i in 0.. {
+            let value = self.minimax(board, 0, depth, alpha as Value, beta as Value)?;
+            // when search fails, grow the window exponentially
+            if value as i64 <= alpha {
+                alpha = (alpha - W * (1 << i)).min(value as i64 - 1).max(-INF as i64);
+            } else if value as i64 >= beta {
+                beta = (beta + W * (1 << i)).max(value as i64 + 1).min(INF as i64);
+            } else {
+                return Some(value);
+            }
+        }
+        panic!();
+    }
+
     fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> Action {
         let mut incumbent = *board.generate_moves().first().unwrap_or(&Action::Pass);
         for depth in 1..=max_depth {
             let start = Instant::now();
-            let score = self.minimax(board, 0, depth, -INF, INF);
+            let score = self.aspiration_search(board, depth);
             let option = self.tt.get(board.zobrist_hash);
             let elapsed = start.elapsed();
             if score.is_none() {
                 eprintln!("depth {}: ran out of time", depth);
                 break;
             }
+            let score = score.unwrap();
             if let Some(entry) = option {
                 incumbent = entry.pv;
-                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, entry.value, board.action_to_string(incumbent), self.nnodes, elapsed.as_millis());
+                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent), self.nnodes, elapsed.as_millis());
             } else {
                 eprintln!("depth {}: could not find matching tt entry", depth);
             }

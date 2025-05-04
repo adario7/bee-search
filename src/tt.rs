@@ -62,7 +62,8 @@ impl TTable {
         let idx = (entry.hash % self.buf.len() as u64) as usize;
         // on collision always keep the new data, to prevent stale entries from living too long
         // if there is no collising keep the deepest entry
-        if self.buf[idx].hash != entry.hash || entry.depth > self.buf[idx].depth {
+        // use >= instead of > to prefer frasher entries in case of a reasearch
+        if self.buf[idx].hash != entry.hash || entry.depth >= self.buf[idx].depth {
             self.buf[idx] = entry;
         }
     }
