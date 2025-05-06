@@ -21,7 +21,12 @@ pub struct Engine {
 struct MoveInfo {
     mv: Action,
     quiet: bool,
+    killer: u8,
+    hist: i64
 }
+
+const KILLER_N: usize = 2;
+type KillerT = [(Action, u8); KILLER_N];
 
 impl Engine {
     pub fn new() -> Self {
@@ -78,10 +83,13 @@ impl Engine {
         true
     }
 
-    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>) -> Vec<MoveInfo> {
+    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
         let mut moves = board.generate_moves().into_iter()
-            .map(|mv| MoveInfo { mv, quiet: Self::is_quiet(board, &mv) })
+            .map(|mv| MoveInfo { mv,
+                quiet: Self::is_quiet(board, &mv),
+                killer: killers.iter().find(|(m, _)| *m == mv).map(|(_, i)| *i).unwrap_or(0),
+                hist: self.history_h[Self::hist_index(board.color(), mv)] })
             .collect::<Vec<_>>();
         moves.sort_by(|a, b| {
             // 1) PV
@@ -96,31 +104,36 @@ impl Engine {
             } else if a.quiet && !b.quiet {
                 return Ordering::Greater;
             }
-            // 3) history heuristic
-            let ha = self.history_h[Self::hist_index(board.color(), a.mv)];
-            let hb = self.history_h[Self::hist_index(board.color(), b.mv)];
-            return hb.cmp(&ha);
+            // 3) killer moves
+            if a.killer != b.killer {
+                return b.killer.cmp(&a.killer);
+            }
+            // 4) history heuristic
+            if a.hist != b.hist {
+                return b.hist.cmp(&a.hist);
+            }
+            return Ordering::Equal;
         });
         moves
     }
 
     // principal variation search
-    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, is_first_move: bool) -> Option<Value> {
+    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, is_first_move: bool) -> Option<Value> {
         if is_first_move{
             // search the first move with the full window
-            self.minimax(board, nply, ndepth, -beta, -alpha).map(|v| -v)
+            self.minimax(board, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
-            let mut score = -self.minimax(board, nply, ndepth, -(alpha+1), -alpha)?;
+            let mut score = -self.minimax(board, nply, ndepth, -(alpha+1), -alpha, killers)?;
             // if the null window search fails, search again with a full window
             if score > alpha && beta - alpha > 1 {
-                score = -self.minimax(board, nply, ndepth, -beta, -alpha)?;
+                score = -self.minimax(board, nply, ndepth, -beta, -alpha, killers)?;
             }
             Some(score)
         }
     }
 
-    fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value) -> Option<Value> {
+    fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         // out of time case
         if Instant::now() > self.deadline {
             return None;
@@ -157,15 +170,16 @@ impl Engine {
             return Some(eval);
         }
 
+        let mut child_klr = Default::default();
         let mut alpha = alpha0;
         let mut best_move: Option<(Value, MoveInfo)> = None;
-        let moves = self.ordered_moves(board, pv);
+        let moves = self.ordered_moves(board, pv, killers);
         let mut explored_quiet = 0;
         for mvi in moves.iter() {
             let mv = mvi.mv;
             let first_move = mv == moves[0].mv;
             board.do_action(mv);
-            let opt = self.pvs(board, ply + 1, depth - 1, alpha, beta, first_move);
+            let opt = self.pvs(board, ply + 1, depth - 1, alpha, beta, &mut child_klr, first_move);
             board.undo_action();
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
@@ -184,7 +198,16 @@ impl Engine {
         if let Some((_, mvi)) = best_move {
             let mv = mvi.mv;
             if alpha >= beta && mvi.quiet && Some(mv) != pv {
-                let bonus = depth as i64 * depth as i64;
+                // remember killer move
+                if let Some((_, cnt)) = killers.iter_mut().find(|(m, _)| *m == mv) {
+                    *cnt = *cnt + 1;
+                } else {
+                    let (kmove, cnt) = killers.iter_mut().min_by_key(|(_, i)| *i).unwrap();
+                    *kmove = mv;
+                    *cnt = 1;
+                }
+                // add history bonus
+                let bonus = (1 as i64) << depth;
                 self.history_h[Self::hist_index(board.color(), mv)] += bonus;
                 for prev in moves.iter() {
                     if prev.mv == mv {
@@ -212,8 +235,9 @@ impl Engine {
         const W: i64 = 70;
         let mut alpha = guess.map(|v| v as i64 - W).unwrap_or(-INF as i64);
         let mut beta = guess.map(|v| v as i64 + W).unwrap_or(INF as i64);
+        let mut root_klr = Default::default();
         for i in 0.. {
-            let value = self.minimax(board, 0, depth, alpha as Value, beta as Value)?;
+            let value = self.minimax(board, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
             // when search fails, grow the window exponentially
             if value as i64 <= alpha {
                 alpha = (alpha - W * (1 << i)).min(value as i64 - 1).max(-INF as i64);
