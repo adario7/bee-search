@@ -10,7 +10,7 @@ try:
     from tqdm import tqdm
 except:
     progress_bar = False
-timeout = 1  # default timeout per move
+timeout = 5  # default timeout per move
 maxmoves = 200 # maximum number of moves per player per game
 
 class Engine:
@@ -140,7 +140,7 @@ class HiveArena:
     
     def save_results(self):
         with open(self.results_file, "w") as f:
-            json.dump(self.results, f)
+            json.dump(self.results, f, indent=2)
 
     def load_ratings(self):
         if os.path.exists(self.ratings_file):
@@ -151,7 +151,7 @@ class HiveArena:
 
     def save_ratings(self):
         with open(self.ratings_file, "w") as f:
-            json.dump(self.ratings, f)
+            json.dump(self.ratings, f, indent=2)
 
     def play_match(self, white_path, black_path, update_elo = False, verbose = False):
         position = self.starting_position
@@ -165,6 +165,9 @@ class HiveArena:
         colors = ['white', 'black']
 
         n_moves = 0
+
+        prev_position = self.starting_position
+        moves = []
 
         while True:
             if game_is_ended(position) or n_moves > maxmoves*2:
@@ -187,18 +190,32 @@ class HiveArena:
                 if verbose:
                     print(f"Move {n_moves}: {color} -> {move[0]}")
                 
+                moves.append(move[0])
                 engine.send(f"play {move[0]}")
                 response = engine.receive(timeout=1)
                 if len(response)==0:
                     raise TimeoutError(f"No play from [{color}].")
                 
+                prev_position = position
                 position = response[0]
                 
                 turn ^= 1
                 n_moves += 1
-            except:
-                engines[turn].restart()
-
+            except TimeoutError:
+                print(f"Error when trying to connnect with engine {engine.name}")
+                result = input("If you want to go on with the next match type \"Y\": ")
+                if result.lower() == 'y':
+                    break
+                else:
+                    exit(0)
+            except IndexError:
+                print("Probably an invalid move was made in this position:")
+                print(prev_position)
+                print("List of moves:")
+                print(moves)
+                position = prev_position
+                break
+                
         if n_moves > maxmoves*2:
             if verbose:
                 print("Maximum number of moves exceeded")
@@ -218,7 +235,8 @@ class HiveArena:
             "black": engines[1].name,
             "winner": winner,
             "final_gamestate": position,
-            "datetime": datetime.datetime.now().isoformat()
+            "datetime": datetime.datetime.now().isoformat(),
+            "move_duration": timeout
         }
 
     def elo_updater(self, white_name, black_name, winner, k=32):
@@ -249,17 +267,20 @@ class HiveArena:
                     for j in range(i+1, n_engines):
                         matches.append((i, j))
             for i, j in tqdm(matches):
-                result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo)
+                result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo, verbose=verbose)
                 self.results.append(result)
+                
+                self.save_results()
+                self.save_ratings()
         else:
             for _ in range(n_matches):
                 for i in range(n_engines):
                     for j in range(i+1, n_engines):
-                        result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo)
+                        result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo,verbose=verbose)
                         self.results.append(result)
 
-        self.save_results()
-        self.save_ratings()
+                        self.save_results()
+                        self.save_ratings()
 
 if __name__ == '__main__':
     engine_paths = []
@@ -282,10 +303,11 @@ if __name__ == '__main__':
 
 
     arena = HiveArena(engine_paths)
-    arena.all_v_all(n_matches=10, update_elo=True)
+    arena.all_v_all(n_matches=100, update_elo=True, verbose=False)
 
 """
     TODO:
     - Assumes that all made moves are valid
     - Probably the elo could be simply recomputed from scratch every time
+    - If a bot crashes, the arena might end up in an infinite loop of trying to restart it and keep getting the same error
 """
