@@ -113,7 +113,7 @@ impl Engine {
             // search the next moves with a null window to prove it is <= alpha
             let mut score = -self.minimax(board, nply, ndepth, -(alpha+1), -alpha)?;
             // if the null window search fails, search again with a full window
-            if score > alpha && beta - alpha > 1 {
+            if score > alpha && beta > alpha + 1 {
                 score = -self.minimax(board, nply, ndepth, -beta, -alpha)?;
             }
             Some(score)
