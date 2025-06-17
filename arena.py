@@ -264,8 +264,9 @@ class HiveArena:
             matches = []
             for _ in range(n_matches):
                 for i in range(n_engines):
-                    for j in range(i+1, n_engines):
-                        matches.append((i, j))
+                    for j in range(n_engines):
+                        if i != j:
+                            matches.append((i, j))
             for i, j in tqdm(matches):
                 result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo, verbose=verbose)
                 self.results.append(result)
@@ -275,12 +276,13 @@ class HiveArena:
         else:
             for _ in range(n_matches):
                 for i in range(n_engines):
-                    for j in range(i+1, n_engines):
-                        result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo,verbose=verbose)
-                        self.results.append(result)
+                    for j in range(n_engines):
+                        if i != j:
+                            result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo,verbose=verbose)
+                            self.results.append(result)
 
-                        self.save_results()
-                        self.save_ratings()
+                            self.save_results()
+                            self.save_ratings()
 
 if __name__ == '__main__':
     engine_paths = []
