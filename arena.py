@@ -5,6 +5,7 @@ import time
 import datetime
 import json
 import os
+import argparse
 progress_bar = True
 try:
     from tqdm import tqdm
@@ -108,7 +109,12 @@ def get_winner_from_gamestate(position):
     return 'other'
 
 def game_is_ended(position):
-    status = position.split(';')[1]
+    status = position.split(';')
+    if len(status) > 1:
+        status = status[1]
+    else:
+        raise IndexError("Status has lenght 1")
+
 
     if status != 'NotStarted' and status != 'InProgress':
         return True
@@ -121,11 +127,10 @@ def path_to_name(path):
     return name
 
 class HiveArena:
-    def __init__(self, engine_paths, per_move_timeout=timeout, results_file="logs/results.json", ratings_file="logs/ratings.json"):
+    def __init__(self, engine_paths, results_folder="logs/"):
         self.engine_paths = engine_paths
-        self.timeout = per_move_timeout
-        self.results_file = results_file
-        self.ratings_file = ratings_file
+        self.results_file = os.path.join(results_folder , "results.json")
+        self.ratings_file = os.path.join(results_folder, "ratings.json")
         self.starting_position = "Base+MLP;NotStarted;White[1]"
 
         self.load_results()
@@ -153,7 +158,7 @@ class HiveArena:
         with open(self.ratings_file, "w") as f:
             json.dump(self.ratings, f, indent=2)
 
-    def play_match(self, white_path, black_path, update_elo = False, verbose = False):
+    def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
 
@@ -181,8 +186,8 @@ class HiveArena:
                 if len(response) == 0:
                     raise TimeoutError(f"No newgame response from [{color}].")
 
-                engine.send(f"bestmove time {seconds_to_hh(self.timeout)}")
-                move = engine.receive(timeout=self.timeout + 1)
+                engine.send(f"bestmove time {seconds_to_hh(timeout)}")
+                move = engine.receive(timeout=timeout + 1)
 
                 if len(move)==0:
                     raise TimeoutError(f"[{color}] timed out or no move")
@@ -202,7 +207,7 @@ class HiveArena:
                 turn ^= 1
                 n_moves += 1
             except TimeoutError:
-                print(f"Error when trying to connnect with engine {engine.name}")
+                print(f"Unable to connnect with engine {engine.name}")
                 result = input("If you want to go on with the next match type \"Y\": ")
                 if result.lower() == 'y':
                     break
@@ -257,7 +262,7 @@ class HiveArena:
         self.ratings[white_name] = round(elo_white + k * (s_white - e_white))
         self.ratings[black_name] = round(elo_black + k * (s_black - e_black))
 
-    def all_v_all(self, n_matches = 1, update_elo=False, verbose=False):
+    def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves):
         n_engines = len(self.engine_paths)
 
         if progress_bar and not verbose:
@@ -268,7 +273,12 @@ class HiveArena:
                         if i != j:
                             matches.append((i, j))
             for i, j in tqdm(matches):
-                result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo, verbose=verbose)
+                result = self.play_match(white_path=self.engine_paths[i],
+                                        black_path=self.engine_paths[j], 
+                                        update_elo=update_elo, 
+                                        verbose=verbose,
+                                        timeout=timeout,
+                                        maxmoves=maxmoves)
                 self.results.append(result)
                 
                 self.save_results()
@@ -278,16 +288,31 @@ class HiveArena:
                 for i in range(n_engines):
                     for j in range(n_engines):
                         if i != j:
-                            result = self.play_match(white_path=self.engine_paths[i], black_path=self.engine_paths[j], update_elo=update_elo,verbose=verbose)
+                            result = self.play_match(white_path=self.engine_paths[i],
+                                                    black_path=self.engine_paths[j], 
+                                                    update_elo=update_elo, 
+                                                    verbose=verbose,
+                                                    timeout=timeout,
+                                                    maxmoves=maxmoves)
                             self.results.append(result)
 
                             self.save_results()
                             self.save_ratings()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Hive bot arena')
+    parser.add_argument("--engine_paths", type=str, default="logs/paths.txt", help="File containing paths to the engine executables")
+    parser.add_argument("--n_matches", type=int, default=1, help="Number of matches")
+    parser.add_argument("--update_elo", type=bool, default=True, help="If the elo gets updated")
+    parser.add_argument("--verbose", type=bool, default=False, help="Display info about matches in real time")
+    parser.add_argument("--results_folder", type=str, default="logs/", help="Folder where the matches are stored")
+    parser.add_argument("--timeout", type=float, default=timeout, help="Time per move")
+    parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
+    args = parser.parse_args()
+
     engine_paths = []
     names = []
-    with open('logs/paths.txt') as f:
+    with open(args.engine_paths) as f:
         for path in f:
             engine_paths.append(path.replace('\n','').replace('\\','/')) # sì ok, uso ancora Windows 
             names.append(path_to_name(engine_paths[-1]))
@@ -304,8 +329,12 @@ if __name__ == '__main__':
                 raise ValueError(f"Names of different engines are the same: \n Name of engine at location \"{path_1}\" is {name_1} \n Name of engine at location \"{path_2}\" is {name_2}")
 
 
-    arena = HiveArena(engine_paths)
-    arena.all_v_all(n_matches=100, update_elo=True, verbose=False)
+    arena = HiveArena(engine_paths, results_folder=args.results_folder)
+    arena.all_v_all(n_matches=args.n_matches, 
+                    update_elo=args.update_elo, 
+                    verbose=args.verbose, 
+                    timeout = args.timeout, 
+                    maxmoves = args.maxmoves)
 
 """
     TODO:
