@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
-use crate::eval::Value;
 use crate::perft;
 
 pub struct Uhp {
