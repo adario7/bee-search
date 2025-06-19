@@ -199,10 +199,10 @@ class HiveArena:
         moves = []
 
         while True:
-            if game_is_ended(position) or n_moves > maxmoves*2:
-                break
-            
             try:
+                if game_is_ended(position) or n_moves > maxmoves*2:
+                    break
+
                 engine = engines[turn]
                 color = colors[turn]
                 engine.send(f"newgame {position}")
