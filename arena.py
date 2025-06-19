@@ -158,6 +158,30 @@ class HiveArena:
         with open(self.ratings_file, "w") as f:
             json.dump(self.ratings, f, indent=2)
 
+    def elo_updater(self, white_name, black_name, winner, k=32):
+        elo_white = self.ratings.get(white_name, 1200)
+        elo_black = self.ratings.get(black_name, 1200)
+
+        e_white = 1 / (1 + 10 ** ((elo_black - elo_white) / 400)) 
+        e_black = 1 - e_white                                     
+
+        if winner == "white":
+            s_white, s_black = 1, 0
+        elif winner == "black":
+            s_white, s_black = 0, 1
+        else:
+            s_white = s_black = 0.5
+
+        # Update ratings
+        self.ratings[white_name] = round(elo_white + k * (s_white - e_white))
+        self.ratings[black_name] = round(elo_black + k * (s_black - e_black))
+
+    def compute_elo_from_results(self):
+        self.ratings = {path_to_name(cmd): 1200 for cmd in self.engine_paths}
+        for match in self.results:
+            self.elo_updater(match["white"], match["black"], match["winner"])
+        self.save_ratings()
+
     def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
@@ -243,24 +267,6 @@ class HiveArena:
             "datetime": datetime.datetime.now().isoformat(),
             "move_duration": timeout
         }
-
-    def elo_updater(self, white_name, black_name, winner, k=32):
-        elo_white = self.ratings.get(white_name, 1200)
-        elo_black = self.ratings.get(black_name, 1200)
-
-        e_white = 1 / (1 + 10 ** ((elo_white - elo_black) / 400)) 
-        e_black = 1 - e_white                                     
-
-        if winner == "white":
-            s_white, s_black = 1, 0
-        elif winner == "black":
-            s_white, s_black = 0, 1
-        else:
-            s_white = s_black = 0.5
-
-        # Update ratings
-        self.ratings[white_name] = round(elo_white + k * (s_white - e_white))
-        self.ratings[black_name] = round(elo_black + k * (s_black - e_black))
 
     def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves):
         n_engines = len(self.engine_paths)
