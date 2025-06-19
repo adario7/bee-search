@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
+use crate::eval::Value;
 use crate::perft;
 
 pub struct Uhp {
@@ -135,10 +136,15 @@ impl Uhp {
         Ok(())
     }
 
-    fn eval(&mut self, _args: &str) -> UhpResult<()> {
-        let eval = self.board.static_eval();
-        println!("{}", eval);
-        Ok(())
+    fn eval(&mut self, args: &str) -> UhpResult<()> {
+        let depth = args.parse::<u8>().unwrap_or(5);
+        if let Some(eval) = self.engine.eval(&mut self.board, depth){
+            println!("{}", eval);
+            Ok(())
+        }else{
+            Err(UhpError::EngineError("Engine unable to find evaluation".to_owned()))
+        }
+        
     }
 
     // https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol#engine-commands

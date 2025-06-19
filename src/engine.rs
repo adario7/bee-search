@@ -272,6 +272,10 @@ impl Engine {
         incumbent
     }
 
+    pub fn eval(&mut self, board: &mut Board, depth: Depth) -> Option<Value> {
+        self.aspiration_search(board, depth)
+    }
+
     pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> Action {
         self.nnodes = 0;
         self.deadline = Instant::now() + max_time;
