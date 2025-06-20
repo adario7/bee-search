@@ -3,7 +3,8 @@ use lazy_static::lazy_static;
 use std::collections::VecDeque;
 
 use crate::abstractions::{TileBitmask, ActionContainer};
-use crate::board::{Action, Board};
+use crate::board::{self, Action, Board, GameResult};
+use crate::eval::{self, Eval};
 use crate::piece::{Color, Piece};
 use crate::piece_type::PieceType;
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO};
@@ -454,6 +455,317 @@ impl Board {
 
         moves.moves
     }
+
+
+    fn generate_placements_n(&mut self, heuristic: bool) -> Eval {
+        let mut n_moves: Eval = 0;
+
+        let player = self.color();
+
+        if heuristic {
+            let mut to_place: Eval = 0;
+            for bug in PieceType::iter_all() {
+                to_place += self.placeable[player.index()][bug.index()] as Eval;
+            }
+            if self.queen_required(){
+                return self.occupied_tiles[player.index()].len() as Eval + 3;
+            }
+            return to_place*(self.occupied_tiles[player.index()].len() as Eval + 3);
+        }
+
+        if self.turn_history.len() < 2 {
+
+            if self.turn_history.len() == 0 {
+                for bug in PieceType::iter_all() {
+                    if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
+                        n_moves += 1;
+                    }
+                }
+            }else {
+                for tile in adjacent(TILE_ZERO) {
+                    for bug in PieceType::iter_all() {
+                        if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
+                            n_moves += 1;
+                        }
+                    }
+                }
+            }
+            return n_moves;
+        }
+
+        // right now it is slow, ideally we want to call set_placeable every time we modify the board only on the cells adjacent to the modification
+        self.set_all_placeables(player);
+        
+        let mut vis = TileBitmask::new(false);
+        for &tile in self.occupied_tiles[player.index()].iter() {
+            for adj in adjacent(tile) {
+                if vis.is_on(adj) {
+                    continue;
+                }
+                vis.set_bit(adj, true);
+                
+                if self.tiles_placeable[player.index()].is_on(adj) {
+
+                    if self.queen_required() {
+                        n_moves += 1;
+                    }
+                    else {
+                    for bug in PieceType::iter_all(){
+                            if self.placeable[player.index()][bug.index()] > 0 {
+                                n_moves += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        n_moves
+    }
+
+    fn generate_walk1_n(&self, origin: Tile, heuristic: bool) -> Eval {
+        if heuristic{
+            return 2;
+        }
+        return self.slidable_adjacent(origin , origin).len() as Eval;
+
+    }
+
+    fn generate_beetle_n(&self, origin: Tile, heuristic: bool) -> Eval {
+        if heuristic {
+            if self.height(origin) == 1 {
+                return 1;
+            }else {
+                return 6;
+            }
+        }
+        return self.slidable_adjacent_beetle(origin, origin).len() as Eval;
+    }
+
+    fn generate_spider_n(&self, origin: Tile, heuristic: bool) -> Eval {
+        if heuristic {
+            return 2;
+        }
+
+        let mut n_moves: Eval = 0;
+
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, true);
+
+        for d1 in self.slidable_adjacent(origin, origin) {
+            let t1 = origin + *d1;
+            for d2 in self.slidable_adjacent(t1, origin) {
+                let t2 = t1 + *d2;
+                if t2 != origin {
+                    for d3 in self.slidable_adjacent(t2, origin) {
+                        let t3 = t2 + *d3;
+                        if t3 != t1 && !vis.is_on(t3) {
+                            n_moves += 1;
+                            vis.set_bit(t3, true);
+                        }
+                    }
+                }
+            }
+        }
+
+        n_moves
+    }
+
+    fn generate_grasshopper_n(&self, origin : Tile, heuristic: bool) -> Eval {
+        if heuristic {
+            return 2;
+        }
+
+        let mut n_moves: Eval = 0;
+
+        for dir in Direction::all() {
+            let mut next = origin + *dir;
+
+            if self.tile(next).is_some() {
+
+                while self.tile(next).is_some() {
+                    next = next + *dir;
+                }
+
+                n_moves += 1;
+            }
+        }
+
+        n_moves
+    }
+
+    fn generate_ladybug_n(&self, origin: Tile, heuristic: bool) -> Eval {
+        if heuristic {
+            return 6;
+        }
+
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, true);
+
+        let mut n_moves: Eval = 0;
+        for d1 in self.slidable_adjacent_beetle(origin, origin) {
+            let t1 = origin + d1;
+            if self.tile(t1).is_some() {
+                for d2 in self.slidable_adjacent_beetle(t1, origin) {
+                    let t2 = t1 + d2;
+                    if t2 != origin && self.tile(t2).is_some() {
+                        for d3 in self.slidable_adjacent_beetle(t2, origin) {
+                            let t3 = t2 + d3;
+                            if t3 != t1 && self.tile(t3).is_none() && !vis.is_on(t3) {
+                                n_moves += 1;
+                                vis.set_bit(t3, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        n_moves
+    }
+    
+    fn generate_ant_n(&self, origin: Tile, heuristic: bool) -> Eval {
+
+        let mut vis = TileBitmask::new(false);
+        vis.set_bit(origin, true);
+
+        let mut queue: VecDeque<Tile> = VecDeque::new();
+        queue.push_back(origin);
+
+        let mut n_moves: Eval = 0;
+        while let Some(tile) = queue.pop_front() {
+            
+            for dir in self.slidable_adjacent(tile, origin) {
+                if !vis.is_on(tile + *dir) {
+                    n_moves += 1;
+                    vis.set_bit(tile + *dir, true);
+                    queue.push_back(tile + *dir);
+                }
+            }
+
+        }
+        
+        n_moves
+    }
+    
+    fn generate_pillbug_n(&self, cut_vertices: &TileBitmask, origin: Tile, heuristic: bool) -> Eval {
+        let mut n_moves: Eval = 0;
+        
+        if !cut_vertices.is_on(origin) {
+            n_moves += self.generate_walk1_n(origin, heuristic);
+        }
+
+        for start in adjacent(origin) {
+            for end in adjacent(origin) {
+                if start != end && !cut_vertices.is_on(start) && self.height(start) == 1 && self.height(end) == 0{
+                    n_moves += 1;
+                }
+            }
+        }
+
+        n_moves
+    }
+
+    fn generate_mosquito_n(&self, cut_vertices: &TileBitmask, origin: Tile, heuristic: bool) -> Eval {
+
+        if self.height(origin) > 1 {
+            return self.generate_beetle_n(origin, heuristic);
+        }
+
+        let mut adjacent_pieces = [false; 8];
+        for adj in adjacent(origin) {
+            if self.tile(adj).is_some() {
+                adjacent_pieces[self.tile(adj).ptype().index()] = true;
+            }
+        }
+
+        let mut n_moves: Eval = 0;
+
+        if adjacent_pieces[PieceType::Pillbug.index()] {
+            n_moves += self.generate_pillbug_n(cut_vertices, origin, heuristic);
+        }
+
+        if cut_vertices.is_on(origin) {
+            return n_moves;
+        }
+
+        if adjacent_pieces[PieceType::Ant.index()] {
+            n_moves += self.generate_ant_n(origin, heuristic);
+        }else {
+            if adjacent_pieces[PieceType::Queen.index()] || adjacent_pieces[PieceType::Pillbug.index()] {
+                n_moves += self.generate_walk1_n(origin, heuristic);
+            }
+            if adjacent_pieces[PieceType::Spider.index()] {
+                n_moves += self.generate_spider_n(origin, heuristic);
+            }
+        }
+
+        if adjacent_pieces[PieceType::Beetle.index()] {
+            n_moves += self.generate_beetle_n(origin, heuristic);
+        }
+
+        if adjacent_pieces[PieceType::Grasshopper.index()] {
+            n_moves += self.generate_grasshopper_n(origin, heuristic);   
+        }
+
+        if adjacent_pieces[PieceType::Ladybug.index()] {
+            n_moves += self.generate_ladybug_n(origin, heuristic);
+        }
+
+        n_moves
+    }
+
+    //only generates the number of possible moves instead of creating the entire array
+    //warning: doesn't check for duplicate moves
+    pub fn generate_moves_n(&mut self, heuristic: bool) -> Eval {
+        let mut n_moves: Eval = 0;
+        
+        n_moves += self.generate_placements_n(heuristic);
+
+        if self.turn_history.len() < 2 || self.placeable[self.color().index()][PieceType::Queen as usize] > 0 {
+            return n_moves;
+        }
+
+        let mut cut_vertices = self.find_cut_vertices();
+
+        let stunned = match self.turn_history.last() {
+            Some(Action::Move(_, dest)) => Some(dest),
+            _ => None,
+        };
+        if let Some(moved) = stunned {
+            cut_vertices.set_bit(*moved, true);
+        }
+
+        for tile in self.occupied_tiles[self.color().index()].iter() {
+            if Some(tile) == stunned {
+                continue;
+            }
+            
+            if !cut_vertices.is_on(*tile){
+                match self.tile(*tile).ptype() {
+                    PieceType::Queen => n_moves += self.generate_walk1_n(*tile, heuristic),
+                    PieceType::Grasshopper => n_moves += self.generate_grasshopper_n(*tile, heuristic),
+                    PieceType::Spider => n_moves += self.generate_spider_n(*tile, heuristic),
+                    PieceType::Ant => n_moves += self.generate_ant_n(*tile, heuristic),
+                    PieceType::Beetle => n_moves += self.generate_beetle_n(*tile, heuristic),
+                    PieceType::Mosquito => n_moves += self.generate_mosquito_n(&cut_vertices, *tile, heuristic),
+                    PieceType::Ladybug => n_moves += self.generate_ladybug_n(*tile, heuristic),
+                    PieceType::Pillbug => n_moves += self.generate_pillbug_n(&cut_vertices, *tile, heuristic)
+                };
+            }
+            else if self.tile(*tile).ptype() == PieceType::Mosquito {
+                n_moves += self.generate_mosquito_n(&cut_vertices, *tile, heuristic);
+            }
+            else if self.tile(*tile).ptype() == PieceType::Pillbug {
+                n_moves += self.generate_pillbug_n(&cut_vertices, *tile, heuristic);
+            }
+            else if self.tile(*tile).ptype() == PieceType::Beetle && self.height(*tile) > 1 {
+                n_moves += self.generate_beetle_n(*tile, heuristic);
+            }
+        }
+
+        n_moves
+    }
 }
 
 #[test]
@@ -467,4 +779,44 @@ fn test_first_move(){
         println!("{:?}", action);
     }
 
+}
+
+use rand::seq::IndexedRandom;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+#[test]
+fn test_move_counting() {
+    let mut max_diff = 0;
+    for game in 0..1000 {
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(game);
+
+        let mut n_moves = 0;
+        while board.game_result() == GameResult::InProgress && n_moves < 400 {
+
+            let mut legal_moves = board.generate_moves(); 
+            let legal_moves_n = board.generate_moves_n(false);
+
+            assert!(legal_moves_n - (legal_moves.len() as Eval) >= 0);
+            max_diff = max(max_diff, legal_moves_n - (legal_moves.len() as Eval));
+
+            legal_moves.sort(); // Sort moves for consistent ordering
+
+            let chosen_action = if legal_moves.is_empty() {
+                Action::Pass // Play pass if no moves available
+            } else {
+                // Select a random move using the seeded RNG
+                *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
+            };
+
+            // Apply the *randomly selected* move
+            board.do_action(chosen_action); 
+
+            n_moves += 1;
+        }
+        
+        assert!(n_moves > 0);
+    }
+
+    println!("{}", max_diff);
 }

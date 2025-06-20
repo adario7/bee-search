@@ -13,7 +13,7 @@ impl Board {
     }
 
     fn moves_score(&mut self) -> Eval {
-        self.generate_moves().len() as Eval
+        self.generate_moves_n(false)
     }
 
     fn score(&mut self) -> Eval {

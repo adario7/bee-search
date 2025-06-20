@@ -41,7 +41,7 @@ impl Uhp {
     }
 
     fn info(&mut self) -> UhpResult<()> {
-        println!("id bee-search 0.1");
+        println!("id bee-search 0.2");
         println!("Mosquito;Ladybug;Pillbug");
         Ok(())
     }
