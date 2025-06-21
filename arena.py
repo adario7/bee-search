@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import argparse
+import numpy as np
 progress_bar = True
 try:
     from tqdm import tqdm
@@ -182,7 +183,7 @@ class HiveArena:
             self.elo_updater(match["white"], match["black"], match["winner"])
         self.save_ratings()
 
-    def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves):
+    def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
 
@@ -197,6 +198,7 @@ class HiveArena:
 
         prev_position = self.starting_position
         moves = []
+    
 
         while True:
             try:
@@ -210,20 +212,30 @@ class HiveArena:
                 if len(response) == 0:
                     raise TimeoutError(f"No newgame response from [{color}].")
 
-                engine.send(f"bestmove time {seconds_to_hh(timeout)}")
-                move = engine.receive(timeout=timeout + 1)
+                if n_moves < random_moves:
+                    engine.send(f"bestmove time {seconds_to_hh(timeout)}")
+                    move = engine.receive(timeout=timeout + 1)
 
-                if len(move)==0:
-                    raise TimeoutError(f"[{color}] timed out or no move")
+                    if len(move)==0:
+                        raise TimeoutError(f"[{color}] timed out or no move")
+                        
+                    if verbose:
+                        print(f"Move {n_moves}: {color} -> {move[0]}")
+                else:
+                    engine.send(f"validmoves")
+                    validmoves = engine.receive(timeout=1)
+
+                    if len(validmoves)==0:
+                        raise TimeoutError(f"Engine {engine.name} couldn't find valid moves")
                     
-                if verbose:
-                    print(f"Move {n_moves}: {color} -> {move[0]}")
+                    move = [np.random.choice(validmoves[0].split(';'))]
+
                 
                 moves.append(move[0])
                 engine.send(f"play {move[0]}")
                 response = engine.receive(timeout=1)
                 if len(response)==0:
-                    raise TimeoutError(f"No play from [{color}].")
+                    raise TimeoutError(f"No play from engine {engine.name}.")
                 
                 prev_position = position
                 position = response[0]
@@ -268,42 +280,30 @@ class HiveArena:
             "move_duration": timeout
         }
 
-    def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves):
+    def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
         n_engines = len(self.engine_paths)
 
+        matches = []
+        for _ in range(n_matches):
+            for i in range(n_engines):
+                for j in range(n_engines):
+                    if i != j:
+                        matches.append((i, j))
         if progress_bar and not verbose:
-            matches = []
-            for _ in range(n_matches):
-                for i in range(n_engines):
-                    for j in range(n_engines):
-                        if i != j:
-                            matches.append((i, j))
-            for i, j in tqdm(matches):
-                result = self.play_match(white_path=self.engine_paths[i],
-                                        black_path=self.engine_paths[j], 
-                                        update_elo=update_elo, 
-                                        verbose=verbose,
-                                        timeout=timeout,
-                                        maxmoves=maxmoves)
-                self.results.append(result)
-                
-                self.save_results()
-                self.save_ratings()
-        else:
-            for _ in range(n_matches):
-                for i in range(n_engines):
-                    for j in range(n_engines):
-                        if i != j:
-                            result = self.play_match(white_path=self.engine_paths[i],
-                                                    black_path=self.engine_paths[j], 
-                                                    update_elo=update_elo, 
-                                                    verbose=verbose,
-                                                    timeout=timeout,
-                                                    maxmoves=maxmoves)
-                            self.results.append(result)
+            matches = tqdm(matches)
 
-                            self.save_results()
-                            self.save_ratings()
+        for i, j in matches:
+            result = self.play_match(white_path=self.engine_paths[i],
+                                    black_path=self.engine_paths[j], 
+                                    update_elo=update_elo, 
+                                    verbose=verbose,
+                                    timeout=timeout,
+                                    maxmoves=maxmoves,
+                                    random_moves=random_moves)
+            self.results.append(result)
+            
+            self.save_results()
+            self.save_ratings()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Hive bot arena')
@@ -314,6 +314,7 @@ if __name__ == '__main__':
     parser.add_argument("--results_folder", type=str, default="logs/", help="Folder where the matches are stored")
     parser.add_argument("--timeout", type=float, default=timeout, help="Time per move")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
+    parser.add_argument("--random_moves", type=int, default=0, help="Number of initial random moves")
     args = parser.parse_args()
 
     engine_paths = []
@@ -340,7 +341,8 @@ if __name__ == '__main__':
                     update_elo=args.update_elo, 
                     verbose=args.verbose, 
                     timeout = args.timeout, 
-                    maxmoves = args.maxmoves)
+                    maxmoves = args.maxmoves,
+                    random_moves=args.random_moves)
 
 """
     TODO:
