@@ -265,7 +265,7 @@ class HiveArena:
 
         if update_elo:
             winner = get_winner_from_gamestate(position)
-            if winner != "other":
+            if winner != "other" and n_moves > random_moves:
                 self.elo_updater(white_name=engines[0].name, black_name=engines[1].name, winner=winner)
 
         engines[0].terminate()
@@ -277,7 +277,8 @@ class HiveArena:
             "winner": winner,
             "final_gamestate": position,
             "datetime": datetime.datetime.now().isoformat(),
-            "move_duration": timeout
+            "move_duration": timeout,
+            "random_moves": random_moves
         }
 
     def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
