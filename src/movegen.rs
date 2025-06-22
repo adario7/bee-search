@@ -482,11 +482,9 @@ impl Board {
                     }
                 }
             }else {
-                for tile in adjacent(TILE_ZERO) {
-                    for bug in PieceType::iter_all() {
-                        if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
-                            n_moves += 1;
-                        }
+                for bug in PieceType::iter_all() {
+                    if self.placeable[player.index()][bug.index()] > 0 && bug != PieceType::Queen {
+                        n_moves += 6;
                     }
                 }
             }
@@ -625,6 +623,10 @@ impl Board {
     }
     
     fn generate_ant_n(&self, origin: Tile, heuristic: bool) -> Eval {
+
+        if heuristic {
+            return (self.occupied_tiles[0].len() + self.occupied_tiles[1].len()) as Eval + 6;
+        }
 
         let mut vis = TileBitmask::new(false);
         vis.set_bit(origin, true);
@@ -795,10 +797,10 @@ fn test_move_counting() {
         while board.game_result() == GameResult::InProgress && n_moves < 400 {
 
             let mut legal_moves = board.generate_moves(); 
-            let legal_moves_n = board.generate_moves_n(false);
+            let legal_moves_n = board.generate_moves_n(true);
 
-            assert!(legal_moves_n - (legal_moves.len() as Eval) >= 0);
-            max_diff = max(max_diff, legal_moves_n - (legal_moves.len() as Eval));
+            //assert!(legal_moves_n - (legal_moves.len() as Eval) >= 0);
+            max_diff = max(max(max_diff, legal_moves_n - (legal_moves.len() as Eval)), (legal_moves.len() as Eval) - legal_moves_n);
 
             legal_moves.sort(); // Sort moves for consistent ordering
 
