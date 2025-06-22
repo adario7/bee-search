@@ -212,7 +212,7 @@ class HiveArena:
                 if len(response) == 0:
                     raise TimeoutError(f"No newgame response from [{color}].")
 
-                if n_moves < random_moves:
+                if n_moves >= random_moves:
                     engine.send(f"bestmove time {seconds_to_hh(timeout)}")
                     move = engine.receive(timeout=timeout + 1)
 
