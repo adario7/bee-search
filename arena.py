@@ -183,6 +183,42 @@ class HiveArena:
             self.elo_updater(match["white"], match["black"], match["winner"])
         self.save_ratings()
 
+    def get_match_counts(self):
+        """Count how many matches each engine has played"""
+        match_counts = {}
+        for engine_path in self.engine_paths:
+            engine_name = path_to_name(engine_path)
+            match_counts[engine_name] = 0
+        
+        for match in self.results:
+            white_name = match["white"]
+            black_name = match["black"]
+            if white_name in match_counts:
+                match_counts[white_name] += 1
+            if black_name in match_counts:
+                match_counts[black_name] += 1
+        
+        return match_counts
+
+    def select_engines_weighted(self):
+        """Select two engines with probability proportional to 1/(1 + matches_played)"""
+        match_counts = self.get_match_counts()
+        
+        # Calculate weights for each engine
+        weights = []
+        for engine_path in self.engine_paths:
+            engine_name = path_to_name(engine_path)
+            matches_played = match_counts.get(engine_name, 0)
+            weight = 1.0 / (1 + matches_played)
+            weights.append(weight)
+        
+        weights = np.array(weights)
+        weights = weights / weights.sum()  # normalize
+        
+        # Select two different engines
+        selected_indices = np.random.choice(len(self.engine_paths), size=2, replace=False, p=weights)
+        return self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
+
     def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
@@ -265,6 +301,8 @@ class HiveArena:
 
         if update_elo:
             winner = get_winner_from_gamestate(position)
+            if verbose:
+                print(f"Winner: {winner}")
             if winner != "other" and n_moves > random_moves:
                 self.elo_updater(white_name=engines[0].name, black_name=engines[1].name, winner=winner)
 
@@ -280,6 +318,67 @@ class HiveArena:
             "move_duration": timeout,
             "random_moves": random_moves
         }
+
+    def continuous_matches(self, engine_paths_file, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
+        """Run matches continuously, reloading engine list after each match"""
+        match_count = 0
+        
+        while True:
+            # Reload engine paths from file
+            try:
+                new_engine_paths = []
+                with open(engine_paths_file) as f:
+                    for path in f:
+                        new_engine_paths.append(path.replace('\n','').replace('\\','/'))
+                
+                # Check if engine list changed
+                if new_engine_paths != self.engine_paths:
+                    if verbose:
+                        print(f"Engine list updated: {len(new_engine_paths)} engines")
+                    self.engine_paths = new_engine_paths
+                    
+                    # Update ratings for new engines
+                    for engine_path in self.engine_paths:
+                        engine_name = path_to_name(engine_path)
+                        if engine_name not in self.ratings:
+                            self.ratings[engine_name] = 1200
+                
+                # Need at least 2 engines
+                if len(self.engine_paths) < 2:
+                    print("Need at least 2 engines, waiting...")
+                    exit(1)
+                    
+            except FileNotFoundError:
+                print(f"Engine paths file {engine_paths_file} not found")
+                exit(1)
+            except Exception as e:
+                print(f"Error reading engine paths: {e}")
+                exit(1)
+            
+            # Select engines weighted by matches played
+            try:
+                white_path, black_path = self.select_engines_weighted()
+                
+                match_count += 1
+                if verbose:
+                    print(f"\n--- Match {match_count} ---")
+                
+                result = self.play_match(white_path=white_path,
+                                        black_path=black_path, 
+                                        update_elo=update_elo, 
+                                        verbose=verbose,
+                                        timeout=timeout,
+                                        maxmoves=maxmoves,
+                                        random_moves=random_moves)
+                self.results.append(result)
+                
+                self.save_results()
+                if update_elo:
+                    self.save_ratings()
+                    
+            except Exception as e:
+                print(f"Error during match: {e}")
+                time.sleep(1)
 
     def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
         n_engines = len(self.engine_paths)
@@ -316,6 +415,7 @@ if __name__ == '__main__':
     parser.add_argument("--timeout", type=float, default=timeout, help="Time per move")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
     parser.add_argument("--random_moves", type=int, default=0, help="Number of initial random moves")
+    parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
     args = parser.parse_args()
 
     engine_paths = []
@@ -338,12 +438,21 @@ if __name__ == '__main__':
 
 
     arena = HiveArena(engine_paths, results_folder=args.results_folder)
-    arena.all_v_all(n_matches=args.n_matches, 
-                    update_elo=args.update_elo, 
-                    verbose=args.verbose, 
-                    timeout = args.timeout, 
-                    maxmoves = args.maxmoves,
-                    random_moves=args.random_moves)
+    
+    if args.continuous:
+        arena.continuous_matches(engine_paths_file=args.engine_paths,
+                                update_elo=args.update_elo, 
+                                verbose=args.verbose, 
+                                timeout=args.timeout, 
+                                maxmoves=args.maxmoves,
+                                random_moves=args.random_moves)
+    else:
+        arena.all_v_all(n_matches=args.n_matches, 
+                        update_elo=args.update_elo, 
+                        verbose=args.verbose, 
+                        timeout = args.timeout, 
+                        maxmoves = args.maxmoves,
+                        random_moves=args.random_moves)
 
 """
     TODO:
