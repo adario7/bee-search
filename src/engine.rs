@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::{Direction, GRID_SIZE}, tt::{TTFlag, TTable}};
+use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TTFlag, TTable}};
 use std::{cmp::Ordering, time::{Duration, Instant}, u64, usize};
 
 pub type Depth = u8;
@@ -12,6 +12,7 @@ fn mate_in(ply: Depth) -> Eval {
 pub struct Engine {
     tt: TTable,
     nnodes: u64,
+    qsnodes: u64,
     deadline: Instant,
     // indexed by color, (from or piece type), to; pass is last entry
     history_h: Vec<i64>
@@ -32,6 +33,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             nnodes: 0,
+            qsnodes: 0,
             deadline: Instant::now(),
             tt: TTable::new(1 << 24), // TODO: make this configurable
             history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
@@ -65,29 +67,21 @@ impl Engine {
         }
     }
 
-    // a move is quiet if it does not attack the opponent's queen
-    fn is_quiet(board: &Board, action: &Action) -> bool {
-        if let Action::Move(_, to) = action {
-            let queen = board.queens[board.color().other() as usize];
-            if let Some(target) = queen {
-                if *to == target {
-                    return false;
-                }
-                for d in Direction::all() {
-                    if *to + *d == target {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
+    fn fail_high(&self, soft: Eval, hard: Eval) -> Eval {
+        debug_assert!(soft >= hard);
+        soft
     }
 
-    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
+    fn fail_low(&self, soft: Eval, hard: Eval) -> Eval {
+        debug_assert!(soft <= hard);
+        soft
+    }
+
+    fn order_moves(&self, moves: Vec<Action>, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
-        let mut moves = board.generate_moves().into_iter()
+        let mut moves = moves.into_iter()
             .map(|mv| MoveInfo { mv,
-                quiet: Self::is_quiet(board, &mv),
+                quiet: board.is_quiet(&mv),
                 killer: killers.iter().find(|(m, _)| *m == mv).map(|(_, i)| *i).unwrap_or(0),
                 hist: self.history_h[Self::hist_index(board.color(), mv)] })
             .collect::<Vec<_>>();
@@ -117,6 +111,35 @@ impl Engine {
         moves
     }
 
+    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
+        self.order_moves(board.generate_moves(), board, pv, killers)
+    }
+
+    fn update_heuristics(&mut self, board: &Board, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
+        let mv = mvi.mv;
+        if alpha >= beta && mvi.quiet && Some(mv) != pv {
+            // remember killer move
+            if let Some((_, cnt)) = killers.iter_mut().find(|(m, _)| *m == mv) {
+                *cnt = *cnt + 1;
+            } else {
+                let (kmove, cnt) = killers.iter_mut().min_by_key(|(_, i)| *i).unwrap();
+                *kmove = mv;
+                *cnt = 1;
+            }
+            // add history bonus
+            let bonus = (1 as i64) << depth;
+            self.history_h[Self::hist_index(board.color(), mv)] += bonus;
+            for prev in moves.iter() {
+                if prev.mv == mv {
+                    break;
+                }
+                if prev.quiet {
+                    self.history_h[Self::hist_index(board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
+                }
+            }
+        }
+    }
+
     // principal variation search
     fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, is_first_move: bool) -> Option<Value> {
         if is_first_move{
@@ -133,6 +156,82 @@ impl Engine {
         }
     }
 
+    fn qsearch(&mut self, board: &mut Board, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+        const QS_DEPTH: Depth = 0; // qsearch is alwyas considered at depth 0, lower then any nomrmal search depth
+
+        // out of time case
+        if Instant::now() > self.deadline {
+            return None;
+        }
+        self.nnodes += 1;
+        self.qsnodes += 1;
+
+        // terminal poisiton case
+        let terminal_score = self.terminal_score(board, ply);
+        if terminal_score.is_some() {
+            return terminal_score;
+        }
+
+        let entry = self.tt.get(board.zobrist_hash);
+        let pv = entry.map(|e| e.pv); // use the PV even if below depth
+        if let Some(entry) = entry {
+            if entry.depth >= QS_DEPTH {
+                // improve out bound
+                if entry.flag == TTFlag::LowerBound {
+                    alpha0 = alpha0.max(entry.value);
+                } else if entry.flag == TTFlag::UpperBound {
+                    beta = beta.min(entry.value);
+                }
+                // return the exact value if this is not the root
+                if ply != 0 && (entry.flag == TTFlag::Exact || alpha0 >= beta) {
+                    return Some(entry.value);
+                }
+            }
+        }
+        let eval = entry.map(|e| e.eval)
+            .unwrap_or_else(|| board.static_eval());
+
+        // stand pat: return immediately if the static eval is good enough, to avoid searching all non-quiet moves
+        let mut alpha = alpha0;
+        alpha = alpha.max(eval);
+        if alpha >= beta {
+            return Some(self.fail_high(alpha, beta));
+        }
+
+        // depth cutoff case
+        if ply >= max_ply {
+            return Some(eval);
+        }
+
+        let mut child_klr = Default::default();
+        let mut best_move: Option<(Value, MoveInfo)> = None;
+        let mut moves = board.generate_moves();
+        moves.retain(|mv| board.is_noisy(mv)); // qsearch only considers noisy moves
+        let moves = self.order_moves(moves, board, pv, killers);
+        for mvi in moves.iter() {
+            let mv = mvi.mv;
+            board.do_action(mv);
+            let opt = self.qsearch(board, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
+            board.undo_action();
+            let value = opt?;
+            if best_move.is_none_or(|(v, _)| value > v) {
+                best_move = Some((value, *mvi));
+            }
+            alpha = alpha.max(value);
+            if alpha >= beta {
+                break;
+            }
+        }
+
+        // update transposition table
+        if let Some((value, mvi)) = best_move {
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, QS_DEPTH);
+        }
+
+        Some(alpha)
+    }
+
+
     fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         // out of time case
         if Instant::now() > self.deadline {
@@ -144,6 +243,13 @@ impl Engine {
         let terminal_score = self.terminal_score(board, ply);
         if terminal_score.is_some() {
             return terminal_score;
+        }
+
+        // depth cutoff case
+        if depth == 0 {
+            //return Some(eval);
+            //return Some(board.static_eval());
+            return self.qsearch(board, ply, ply * 2, alpha0, beta, killers);
         }
 
         let entry = self.tt.get(board.zobrist_hash);
@@ -164,11 +270,6 @@ impl Engine {
         }
         let eval = entry.map(|e| e.eval)
             .unwrap_or_else(|| board.static_eval());
-
-        // depth cutoff case
-        if depth == 0 {
-            return Some(eval);
-        }
 
         let mut child_klr = Default::default();
         let mut alpha = alpha0;
@@ -196,28 +297,7 @@ impl Engine {
 
         // update history heuristic
         if let Some((_, mvi)) = best_move {
-            let mv = mvi.mv;
-            if alpha >= beta && mvi.quiet && Some(mv) != pv {
-                // remember killer move
-                if let Some((_, cnt)) = killers.iter_mut().find(|(m, _)| *m == mv) {
-                    *cnt = *cnt + 1;
-                } else {
-                    let (kmove, cnt) = killers.iter_mut().min_by_key(|(_, i)| *i).unwrap();
-                    *kmove = mv;
-                    *cnt = 1;
-                }
-                // add history bonus
-                let bonus = (1 as i64) << depth;
-                self.history_h[Self::hist_index(board.color(), mv)] += bonus;
-                for prev in moves.iter() {
-                    if prev.mv == mv {
-                        break;
-                    }
-                    if prev.quiet {
-                        self.history_h[Self::hist_index(board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
-                    }
-                }
-            }
+            self.update_heuristics(board, depth, alpha, beta, killers, pv, mvi, &moves, explored_quiet);
         }
 
         // update transposition table
@@ -225,7 +305,7 @@ impl Engine {
             self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, depth);
         }
 
-        best_move.map(|(value, _)| value)
+        Some(alpha)
     }
 
     fn aspiration_search(&mut self, board: &mut Board, depth: Depth) -> Option<Value> {
@@ -264,7 +344,7 @@ impl Engine {
             let score = score.unwrap();
             if let Some(entry) = option {
                 incumbent = entry.pv;
-                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent), self.nnodes, elapsed.as_millis());
+                eprintln!("depth {}: score={}, move={}, [qs]nodes={}/{}, time={}ms", depth, score, board.action_to_string(incumbent), self.qsnodes, self.nnodes, elapsed.as_millis());
             } else {
                 eprintln!("depth {}: could not find matching tt entry", depth);
             }
@@ -274,6 +354,7 @@ impl Engine {
 
     pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> Action {
         self.nnodes = 0;
+        self.qsnodes = 0;
         self.deadline = Instant::now() + max_time;
         self.iterative_deepening(board, max_depth)
     }

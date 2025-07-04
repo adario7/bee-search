@@ -3,7 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
 
-use crate::tile::{adjacent, Tile, GRID_SIZE};
+use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
 use crate::piece_type::{Pct, PieceType};
 use crate::abstractions::*;
@@ -260,6 +260,30 @@ impl Board {
             (_, 6) => GameResult::Winner(Color::White),
             (_, _) => GameResult::InProgress,
         }
+    }
+
+
+    // a move is noisy if attacks the opponent's queen
+    pub fn is_noisy(self: &Board, action: &Action) -> bool {
+        if let Action::Move(_, to) = action {
+            let queen = self.queens[self.color().other() as usize];
+            if let Some(target) = queen {
+                if *to == target {
+                    return true;
+                }
+                for d in Direction::all() {
+                    if *to + *d == target {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // a move is quiet if it does not attack the opponent's queen
+    pub fn is_quiet(self: &Board, action: &Action) -> bool {
+        !self.is_noisy(action)
     }
 }
 
