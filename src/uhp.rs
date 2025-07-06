@@ -41,7 +41,14 @@ impl Uhp {
     }
 
     fn info(&mut self) -> UhpResult<()> {
-        println!("id bee-search 0.2");
+        let version = env!("CARGO_PKG_VERSION");
+        let hash = env!("GIT_HASH");
+        let profile = if cfg!(debug_assertions) {
+            "-DEBUG"
+        } else {
+            ""
+        };
+        println!("id bee-search {}-{}{}", version, hash, profile);
         println!("Mosquito;Ladybug;Pillbug");
         Ok(())
     }
