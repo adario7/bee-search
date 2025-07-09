@@ -14,8 +14,11 @@ pub struct Engine {
     nnodes: u64,
     qsnodes: u64,
     deadline: Instant,
-    // indexed by color, (from or piece type), to; pass is last entry
-    history_h: Vec<i64>
+    // heremoves are indexed by color, (from or piece type), to; pass is last entry
+    // map move -> history score 
+    history_h: Vec<i64>,
+    // map move -> countermove producing a beta cutoff
+    countermove: Vec<Action>
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +40,7 @@ impl Engine {
             deadline: Instant::now(),
             tt: TTable::new(1 << 24), // TODO: make this configurable
             history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+            countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
         }
     }
 
@@ -50,6 +54,11 @@ impl Engine {
             Action::Pass
                 => 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE
         }
+    }
+
+    fn last_move_index(b: &Board) -> usize {
+        let last_move = b.turn_history.last().unwrap_or(&Action::Pass);
+        Self::hist_index(b.color().other(), *last_move)
     }
 
     fn terminal_score(&self, board: &Board, ply: Depth) -> Option<Value> {
@@ -79,6 +88,7 @@ impl Engine {
 
     fn order_moves(&self, moves: Vec<Action>, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
+        let countermove = self.countermove[Self::last_move_index(board)];
         let mut moves = moves.into_iter()
             .map(|mv| MoveInfo { mv,
                 quiet: board.is_quiet(&mv),
@@ -102,7 +112,13 @@ impl Engine {
             if a.killer != b.killer {
                 return b.killer.cmp(&a.killer);
             }
-            // 4) history heuristic
+            // 4) countermove
+            if a.mv == countermove {
+                return Ordering::Less;
+            } else if b.mv == countermove {
+                return Ordering::Greater;
+            }
+            // 5) history heuristic
             if a.hist != b.hist {
                 return b.hist.cmp(&a.hist);
             }
@@ -126,6 +142,8 @@ impl Engine {
                 *kmove = mv;
                 *cnt = 1;
             }
+            // remember countermove
+            self.countermove[Self::last_move_index(board)] = mv;
             // add history bonus
             let bonus = (1 as i64) << depth;
             self.history_h[Self::hist_index(board.color(), mv)] += bonus;
