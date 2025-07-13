@@ -206,8 +206,14 @@ impl Engine {
                 }
             }
         }
-        let eval = entry.map(|e| e.eval)
-            .unwrap_or_else(|| board.static_eval());
+        let mut moves: Option<Vec<Action>> = None;
+        let eval = entry.and_then(|e| e.eval)
+            .unwrap_or_else(|| {
+                let mv = board.generate_moves();
+                let len = mv.len();
+                moves = Some(mv);
+                board.static_eval_fast(len)
+            });
 
         // stand pat: return immediately if the static eval is good enough, to avoid searching all non-quiet moves
         let mut alpha = alpha0;
@@ -221,9 +227,9 @@ impl Engine {
             return Some(eval);
         }
 
+        let mut moves = moves.unwrap_or_else(|| board.generate_moves());
         let mut child_klr = Default::default();
         let mut best_move: Option<(Value, MoveInfo)> = None;
-        let mut moves = board.generate_moves();
         moves.retain(|mv| board.is_noisy(mv)); // qsearch only considers noisy moves
         let moves = self.order_moves(moves, board, pv, killers);
         for mvi in moves.iter() {
@@ -243,7 +249,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, QS_DEPTH);
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), QS_DEPTH);
         }
 
         Some(alpha)
@@ -265,8 +271,6 @@ impl Engine {
 
         // depth cutoff case
         if depth == 0 {
-            //return Some(eval);
-            //return Some(board.static_eval());
             return self.qsearch(board, ply, ply * 2, alpha0, beta, killers);
         }
 
@@ -286,8 +290,6 @@ impl Engine {
                 }
             }
         }
-        let eval = entry.map(|e| e.eval)
-            .unwrap_or_else(|| board.static_eval());
 
         let mut child_klr = Default::default();
         let mut alpha = alpha0;
@@ -320,7 +322,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, depth);
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, None, depth);
         }
 
         Some(alpha)

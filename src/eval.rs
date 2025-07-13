@@ -12,18 +12,20 @@ impl Board {
         }
     }
 
-    fn moves_score(&mut self) -> Eval {
-        self.generate_moves().len() as Eval
-    }
-
-    fn score(&mut self) -> Eval {
-        1000 * self.queen_score() + self.moves_score()
+    fn score(&self, my_moves_n: usize) -> Eval {
+        1000 * self.queen_score() + my_moves_n as Eval
     }
 
     pub fn static_eval(&mut self) -> Eval {
-        let my_score = self.score();
+        let my_moves_n = self.generate_moves().len();
+        self.static_eval_fast(my_moves_n)
+    }
+
+    pub fn static_eval_fast(&mut self, my_moves_n: usize) -> Eval {
+        let my_score = self.score(my_moves_n);
         self.turn_num += 1;
-        let their_score = self.score();
+        let their_move_n = self.generate_moves().len();
+        let their_score = self.score(their_move_n);
         self.turn_num -= 1;
         my_score - their_score
     }

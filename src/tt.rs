@@ -15,7 +15,7 @@ pub struct TEntry {
     pub hash: u64,
     pub pv: Action,
     pub value: Value,
-    pub eval: Eval,
+    pub eval: Option<Eval>,
     pub depth: Depth,
     pub flag: TTFlag,
 }
@@ -40,7 +40,7 @@ impl TTable {
         Some(entry)
     }
 
-    pub fn put(&mut self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Eval, depth: Depth) {
+    pub fn put(&mut self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Option<Eval>, depth: Depth) {
         let flag = if value >= beta {
             TTFlag::LowerBound
         } else if value <= alpha {
@@ -63,8 +63,13 @@ impl TTable {
         // on collision always keep the new data, to prevent stale entries from living too long
         // if there is no collising keep the deepest entry
         // use >= instead of > to prefer frasher entries in case of a reasearch
-        if self.buf[idx].hash != entry.hash || entry.depth >= self.buf[idx].depth {
+        let collision = self.buf[idx].hash != entry.hash;
+        if collision || entry.depth >= self.buf[idx].depth {
+            let prev_eval = self.buf[idx].eval;
             self.buf[idx] = entry;
+            if !collision && entry.eval.is_none() && prev_eval.is_some() { // don't forget the eval!
+                self.buf[idx].eval = prev_eval;
+            }
         }
     }
 
