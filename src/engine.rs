@@ -159,8 +159,8 @@ impl Engine {
     }
 
     // principal variation search
-    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, is_first_move: bool) -> Option<Value> {
-        if is_first_move{
+    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, full_search: bool) -> Option<Value> {
+        if full_search {
             // search the first move with the full window
             self.minimax(board, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
@@ -298,7 +298,7 @@ impl Engine {
         let mut explored_quiet = 0;
         for mvi in moves.iter() {
             let mv = mvi.mv;
-            let first_move = mv == moves[0].mv;
+            let first_move = mv == moves[0].mv || depth <= 2;
             board.do_action(mv);
             let opt = self.pvs(board, ply + 1, depth - 1, alpha, beta, &mut child_klr, first_move);
             board.undo_action();
