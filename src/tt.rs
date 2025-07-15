@@ -22,17 +22,28 @@ pub struct TEntry {
 
 pub struct TTable {
     buf: Vec<TEntry>,
+    mask: usize,
+    pub nwrite: usize,
+    pub ncollisions: usize,
 }
 
 impl TTable {
-    pub fn new(size: usize) -> Self {
+    pub fn new(byte_size: usize) -> Self {
+        let size = (byte_size / std::mem::size_of::<TEntry>()).next_power_of_two();
         Self {
             buf: vec![Default::default(); size],
+            mask: size - 1,
+            nwrite: 0,
+            ncollisions: 0,
         }
     }
 
+    fn index(&self, hash: u64) -> usize {
+        hash as usize & self.mask
+    }
+
     pub fn get(&self, hash: u64) -> Option<TEntry> {
-        let idx = (hash % self.buf.len() as u64) as usize;
+        let idx = self.index(hash);
         let entry = self.buf[idx];
         if entry.flag == TTFlag::Null || entry.hash != hash {
             return None;
@@ -59,11 +70,17 @@ impl TTable {
     }
 
     pub fn put_entry(&mut self, entry: TEntry) {
-        let idx = (entry.hash % self.buf.len() as u64) as usize;
+        let idx = self.index(entry.hash);
         // on collision always keep the new data, to prevent stale entries from living too long
         // if there is no collising keep the deepest entry
         // use >= instead of > to prefer frasher entries in case of a reasearch
         let collision = self.buf[idx].hash != entry.hash;
+
+        self.nwrite += 1;
+        if collision && self.buf[idx].hash != 0 {
+            self.ncollisions += 1;
+        }
+
         if collision || entry.depth >= self.buf[idx].depth {
             let prev_eval = self.buf[idx].eval;
             self.buf[idx] = entry;

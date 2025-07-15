@@ -38,7 +38,7 @@ impl Engine {
             nnodes: 0,
             qsnodes: 0,
             deadline: Instant::now(),
-            tt: TTable::new(1 << 24), // TODO: make this configurable
+            tt: TTable::new(1 << 28), // TODO: make this configurable
             history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
             countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
         }
@@ -373,10 +373,16 @@ impl Engine {
     }
 
     pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> Action {
+        let start = Instant::now();
         self.nnodes = 0;
         self.qsnodes = 0;
-        self.deadline = Instant::now() + max_time;
-        self.iterative_deepening(board, max_depth)
+        self.tt.nwrite = 0;
+        self.tt.ncollisions = 0;
+        self.deadline = start + max_time;
+        let r = self.iterative_deepening(board, max_depth);
+        eprintln!("explored {:.3} knodes/s", self.nnodes as f64 / start.elapsed().as_secs_f64() / 1000.0);
+        eprintln!("tt collisions: {}/{}, {:.2}%", self.tt.ncollisions, self.tt.nwrite, 100.0 * self.tt.ncollisions as f64 / self.tt.nwrite as f64);
+        r
     }
 
     pub fn clear_tt(&mut self) {
