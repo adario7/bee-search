@@ -176,7 +176,6 @@ impl Engine {
 
     fn qsearch(&mut self, board: &mut Board, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         const QS_DEPTH: Depth = 0; // qsearch is alwyas considered at depth 0, lower then any nomrmal search depth
-
         // out of time case
         if Instant::now() > self.deadline {
             return None;
@@ -352,6 +351,7 @@ impl Engine {
 
     fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> Action {
         let mut incumbent = *board.generate_moves().first().unwrap_or(&Action::Pass);
+        let mut prev_nodes = self.nnodes;
         for depth in 1..=max_depth {
             let start = Instant::now();
             let score = self.aspiration_search(board, depth);
@@ -364,10 +364,11 @@ impl Engine {
             let score = score.unwrap();
             if let Some(entry) = option {
                 incumbent = entry.pv;
-                eprintln!("depth {}: score={}, move={}, [qs]nodes={}/{}, time={}ms", depth, score, board.action_to_string(incumbent), self.qsnodes, self.nnodes, elapsed.as_millis());
+                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent), self.nnodes - prev_nodes, elapsed.as_millis());
             } else {
                 eprintln!("depth {}: could not find matching tt entry", depth);
             }
+            prev_nodes = self.nnodes;
         }
         incumbent
     }
@@ -380,7 +381,8 @@ impl Engine {
         self.tt.ncollisions = 0;
         self.deadline = start + max_time;
         let r = self.iterative_deepening(board, max_depth);
-        eprintln!("explored {:.3} knodes/s", self.nnodes as f64 / start.elapsed().as_secs_f64() / 1000.0);
+        let elapsed = start.elapsed().as_secs_f64();
+        eprintln!("explored {} nodes in {:.2}s -> {:.3} knodes/s, in qsearch={:.1}%", self.nnodes, elapsed, self.nnodes as f64 / elapsed / 1000.0, 100.0 * self.qsnodes as f64 / self.nnodes as f64);
         eprintln!("tt collisions: {}/{}, {:.2}%", self.tt.ncollisions, self.tt.nwrite, 100.0 * self.tt.ncollisions as f64 / self.tt.nwrite as f64);
         r
     }
