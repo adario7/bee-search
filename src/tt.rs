@@ -7,6 +7,7 @@ pub enum TTFlag {
     LowerBound = 1,
     UpperBound = 2,
     Exact = 3,
+    OnlyEval = 4,
 }
 
 //#[repr(packed)] TODO: test consequences of this
@@ -87,6 +88,18 @@ impl TTable {
             if !collision && entry.eval.is_none() && prev_eval.is_some() { // don't forget the eval!
                 self.buf[idx].eval = prev_eval;
             }
+        }
+    }
+
+    pub fn put_eval(&mut self, hash: u64, eval: Eval) {
+        let idx = self.index(hash);
+        let entry = &mut self.buf[idx];
+        if entry.flag == TTFlag::Null { // free spot
+            entry.hash = hash;
+            entry.flag = TTFlag::OnlyEval;
+            entry.eval = Some(eval);
+        } else if entry.hash == hash && entry.eval.is_none() { // existing entry missing eval
+            entry.eval = Some(eval);
         }
     }
 

@@ -176,6 +176,7 @@ impl Engine {
 
     fn qsearch(&mut self, board: &mut Board, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         const QS_DEPTH: Depth = 0; // qsearch is alwyas considered at depth 0, lower then any nomrmal search depth
+
         // out of time case
         if Instant::now() > self.deadline {
             return None;
@@ -206,6 +207,7 @@ impl Engine {
             }
         }
         let mut moves: Option<Vec<Action>> = None;
+        let eval_was_missing = entry.map(|e| e.eval).is_none();
         let eval = entry.and_then(|e| e.eval)
             .unwrap_or_else(|| {
                 let mv = board.generate_moves();
@@ -218,6 +220,9 @@ impl Engine {
         let mut alpha = alpha0;
         alpha = alpha.max(eval);
         if alpha >= beta {
+            if eval_was_missing {
+                self.tt.put_eval(board.zobrist_hash, eval);
+            }
             return Some(self.fail_high(alpha, beta));
         }
 
