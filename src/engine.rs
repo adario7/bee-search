@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TTFlag, TTable}};
+use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
 use std::{cmp::Ordering, time::{Duration, Instant}, u64, usize};
 
 pub type Depth = u8;
@@ -81,10 +81,10 @@ impl Engine {
         soft
     }
 
-    fn fail_low(&self, soft: Eval, hard: Eval) -> Eval {
+    /*fn fail_low(&self, soft: Eval, hard: Eval) -> Eval {
         debug_assert!(soft <= hard);
         soft
-    }
+    }*/
 
     fn order_moves(&self, moves: Vec<Action>, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
@@ -125,10 +125,6 @@ impl Engine {
             return Ordering::Equal;
         });
         moves
-    }
-
-    fn ordered_moves(&self, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
-        self.order_moves(board.generate_moves(), board, pv, killers)
     }
 
     fn update_heuristics(&mut self, board: &Board, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
@@ -174,6 +170,18 @@ impl Engine {
         }
     }
 
+    fn eval_with_caches(&mut self, board: &mut Board, entry: Option<TEntry>, moves: &mut Option<Vec<Action>>) -> Eval {
+        entry.and_then(|e| e.eval)
+            .unwrap_or_else(|| {
+                let mv = board.generate_moves();
+                let len = mv.len();
+                *moves = Some(mv);
+                let e = board.static_eval_fast(len);
+                self.tt.put_eval(board.zobrist_hash, e);
+                e
+            })
+    }
+
     fn qsearch(&mut self, board: &mut Board, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         const QS_DEPTH: Depth = 0; // qsearch is alwyas considered at depth 0, lower then any nomrmal search depth
 
@@ -207,22 +215,12 @@ impl Engine {
             }
         }
         let mut moves: Option<Vec<Action>> = None;
-        let eval_was_missing = entry.map(|e| e.eval).is_none();
-        let eval = entry.and_then(|e| e.eval)
-            .unwrap_or_else(|| {
-                let mv = board.generate_moves();
-                let len = mv.len();
-                moves = Some(mv);
-                board.static_eval_fast(len)
-            });
+        let eval = self.eval_with_caches(board, entry, &mut moves);
 
         // stand pat: return immediately if the static eval is good enough, to avoid searching all non-quiet moves
         let mut alpha = alpha0;
         alpha = alpha.max(eval);
         if alpha >= beta {
-            if eval_was_missing {
-                self.tt.put_eval(board.zobrist_hash, eval);
-            }
             return Some(self.fail_high(alpha, beta));
         }
 
@@ -267,17 +265,18 @@ impl Engine {
         }
         self.nnodes += 1;
 
+        // depth cutoff case
+        if depth == 0 {
+            return self.qsearch(board, ply, ply * 2, alpha0, beta, killers);
+        }
+
         // terminal poisiton case
         let terminal_score = self.terminal_score(board, ply);
         if terminal_score.is_some() {
             return terminal_score;
         }
 
-        // depth cutoff case
-        if depth == 0 {
-            return self.qsearch(board, ply, ply * 2, alpha0, beta, killers);
-        }
-
+        // tt lookup
         let entry = self.tt.get(board.zobrist_hash);
         let pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
@@ -295,10 +294,29 @@ impl Engine {
             }
         }
 
-        let mut child_klr = Default::default();
+        let mut moves: Option<Vec<Action>> = None;
+
+        // null move pruning
+        const NMR: Depth = 2;
+        if depth > NMR && ply > 0 {
+            let eval = self.eval_with_caches(board, entry, &mut moves);
+            if eval >= beta {
+                let mut nm_klr = Default::default();
+                board.do_action(Action::Pass);
+                let value = -self.minimax(board, ply+1, depth - NMR, -beta, -beta + 1, &mut nm_klr)?;
+                board.undo_action();
+                if value >= beta {
+                    return Some(self.fail_high(value, beta));
+                }
+            }
+        }
+
+
+        let moves = moves.unwrap_or_else(|| board.generate_moves());
+        let moves = self.order_moves(moves, board, pv, killers);
         let mut alpha = alpha0;
         let mut best_move: Option<(Value, MoveInfo)> = None;
-        let moves = self.ordered_moves(board, pv, killers);
+        let mut child_klr = Default::default();
         let mut explored_quiet = 0;
         for mvi in moves.iter() {
             let mv = mvi.mv;
