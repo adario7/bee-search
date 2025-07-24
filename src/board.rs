@@ -217,6 +217,11 @@ impl Board {
         Piece::make(self.color(), pct, num)
     }
 
+    /// very slow!
+    pub fn is_legal(&self, action: Action) -> bool {
+        self.generate_moves().contains(&action)
+    }
+
     /// assumes the action is legal
     pub fn do_action(&mut self, action: Action) {
         match action {

@@ -61,6 +61,9 @@ impl Uhp {
 
     fn play(&mut self, args: &str) -> UhpResult<()> {
         let m = self.board.parse_action(args)?;
+        if !self.board.is_legal(m) {
+            return Err(UhpError::InvalidMove(args.to_string()));
+        }
         self.board.do_action(m); // TODO: check for illegal moves
         println!("{}", self.board.game_string());
         Ok(())
