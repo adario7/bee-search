@@ -52,7 +52,7 @@ impl TTable {
         Some(entry)
     }
 
-    pub fn put(&mut self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Option<Eval>, depth: Depth) {
+    pub fn put(&mut self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Option<Eval>, ply: Depth, depth: Depth) {
         let flag = if value >= beta {
             TTFlag::LowerBound
         } else if value <= alpha {
@@ -67,10 +67,10 @@ impl TTable {
             eval,
             depth,
             flag,
-        });
+        }, ply);
     }
 
-    pub fn put_entry(&mut self, entry: TEntry) {
+    pub fn put_entry(&mut self, entry: TEntry, ply: Depth) {
         let idx = self.index(entry.hash);
         // on collision always keep the new data, to prevent stale entries from living too long
         // if there is no collising keep the deepest entry
@@ -82,7 +82,8 @@ impl TTable {
             self.ncollisions += 1;
         }
 
-        if collision || entry.depth >= self.buf[idx].depth {
+        // overwrite on collisions, at the root node, or if we got a deeper entry
+        if collision || ply==0 || entry.depth >= self.buf[idx].depth {
             let prev_eval = self.buf[idx].eval;
             self.buf[idx] = entry;
             if !collision && entry.eval.is_none() && prev_eval.is_some() { // don't forget the eval!
@@ -101,6 +102,11 @@ impl TTable {
         } else if entry.hash == hash && entry.eval.is_none() { // existing entry missing eval
             entry.eval = Some(eval);
         }
+    }
+
+    pub fn clear_one(&mut self, hash: u64) {
+        let idx = self.index(hash);
+        self.buf[idx] = Default::default();
     }
 
     pub fn clear(&mut self) {

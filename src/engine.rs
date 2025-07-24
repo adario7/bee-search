@@ -251,7 +251,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), QS_DEPTH);
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), ply, QS_DEPTH);
         }
 
         Some(alpha)
@@ -273,6 +273,7 @@ impl Engine {
         // terminal poisiton case
         let terminal_score = self.terminal_score(board, ply);
         if terminal_score.is_some() {
+            debug_assert!(ply > 0);
             return terminal_score;
         }
 
@@ -344,7 +345,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, None, depth);
+            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, None, ply, depth);
         }
 
         Some(alpha)
@@ -373,6 +374,7 @@ impl Engine {
     }
 
     fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> Action {
+        self.tt.clear_one(board.zobrist_hash); // make sure the root TT is available
         let mut incumbent = *board.generate_moves().first().unwrap_or(&Action::Pass);
         let mut prev_nodes = self.nnodes;
         for depth in 1..=max_depth {
@@ -391,6 +393,7 @@ impl Engine {
             } else {
                 eprintln!("depth {}: could not find matching tt entry", depth);
             }
+            debug_assert!(board.is_legal(incumbent));
             prev_nodes = self.nnodes;
         }
         incumbent
