@@ -260,44 +260,45 @@ class HiveArena:
                 if len(response) == 0:
                     raise TimeoutError(f"No newgame response from [{color}].")
 
-                if n_moves >= random_moves:
+                engine.send(f"validmoves")
+                validmoves = engine.receive(timeout=1)
+                if len(validmoves)==0:
+                    raise TimeoutError(f"Engine {engine.name} couldn't find valid moves")
+                validmoves = validmoves[0].split(';')
+
+                if n_moves < random_moves:
+                    move = str(np.random.choice(validmoves))
+                else:
                     engine.send(f"bestmove time {seconds_to_hh(timeout)}")
                     move = engine.receive(timeout=timeout + THINK_TOL)
-
                     if len(move)==0:
                         raise TimeoutError(f"[{color}] timed out or no move")
-                        
+                    move = move[0]
                     if verbose:
-                        print(f"Move {n_moves}: {color} -> {move[0]}")
-                else:
-                    engine.send(f"validmoves")
-                    validmoves = engine.receive(timeout=1)
+                        print(f"Move {n_moves}: {color} -> {move}")
+                    if move not in validmoves:
+                        raise TimeoutError(f"Move {move} is not a valid move for {color}")
 
-                    if len(validmoves)==0:
-                        raise TimeoutError(f"Engine {engine.name} couldn't find valid moves")
-                    
-                    move = [np.random.choice(validmoves[0].split(';'))]
-
-                
-                moves.append(move[0])
-                engine.send(f"play {move[0]}")
+                moves.append(move)
+                engine.send(f"play {move}")
                 response = engine.receive(timeout=1)
                 if len(response)==0:
                     raise TimeoutError(f"No play from engine {engine.name}.")
-                
                 prev_position = position
                 position = response[0]
                 
                 turn ^= 1
                 n_moves += 1
-            except TimeoutError:
+            except TimeoutError as e:
+                print(e)
                 print(f"Unable to connnect with engine {engine.name}")
                 result = input("If you want to go on with the next match type \"Y\": ")
                 if result.lower() == 'y':
                     break
                 else:
                     exit(0)
-            except IndexError:
+            except IndexError as e:
+                print(e)
                 print("Probably an invalid move was made in this position:")
                 print(prev_position)
                 print("List of moves:")
