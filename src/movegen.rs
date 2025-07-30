@@ -213,8 +213,6 @@ impl Board {
                 }
             }
         }
-
-        n_moves
     }
 
     fn generate_walk_all(&self, orig: Tile, turns: &mut Vec<Action>) {
@@ -263,8 +261,6 @@ impl Board {
                 }
             }
         }
-
-        n_moves
     }
 
     fn generate_throws(
@@ -299,8 +295,6 @@ impl Board {
                 throw_ends.set(end);
             }
         }
-
-        n_moves
     }
 
     fn generate_mosquito(&self, hex: Tile, turns: &mut Vec<Action>) {
@@ -311,8 +305,6 @@ impl Board {
                 targets[node.ptype() as usize] = true;
             }
         }
-
-        let mut n_moves: Eval = 0;
 
         let mut i = turns.len();
         if targets[Pct::Ant as usize] {
@@ -498,44 +490,4 @@ fn test_first_move(){
         println!("{:?}", action);
     }
 
-}
-
-use rand::seq::IndexedRandom;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-#[test]
-fn test_move_counting() {
-    let mut max_diff = 0;
-    for game in 0..1000 {
-        let mut board = Board::new();
-        let mut rng = StdRng::seed_from_u64(game);
-
-        let mut n_moves = 0;
-        while board.game_result() == GameResult::InProgress && n_moves < 400 {
-
-            let mut legal_moves = board.generate_moves(); 
-            let legal_moves_n = board.generate_moves_n(true);
-
-            //assert!(legal_moves_n - (legal_moves.len() as Eval) >= 0);
-            max_diff = max(max(max_diff, legal_moves_n - (legal_moves.len() as Eval)), (legal_moves.len() as Eval) - legal_moves_n);
-
-            legal_moves.sort(); // Sort moves for consistent ordering
-
-            let chosen_action = if legal_moves.is_empty() {
-                Action::Pass // Play pass if no moves available
-            } else {
-                // Select a random move using the seeded RNG
-                *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
-            };
-
-            // Apply the *randomly selected* move
-            board.do_action(chosen_action); 
-
-            n_moves += 1;
-        }
-        
-        assert!(n_moves > 0);
-    }
-
-    println!("{}", max_diff);
 }
