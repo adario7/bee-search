@@ -156,6 +156,28 @@ impl Uhp {
         
     }
 
+    fn print_graph(&self) -> UhpResult<()> {
+        let (nodes, edges, features) = self.board.get_graph();
+        println!("{}", nodes.len());
+        for node in &nodes {
+            println!("{} ", node);
+        }
+        for feature in &features {
+            for f in feature {
+                print!("{} ", f);
+            }
+            println!();
+        }
+        println!("{}", edges.len());
+        for i in 0..edges.len() {
+            for j in 0..edges[i].len() {
+                print!("{} ", edges[i][j] as u8);
+            }
+            println!()
+        }
+        Ok(())
+    }
+
     // https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol#engine-commands
     fn command(&mut self, line: &str) {
         let line = line.trim();
@@ -174,6 +196,7 @@ impl Uhp {
             // secret commands
             "perft" => self.perft(args),
             "eval" => self.eval(args),
+            "graph" => self.print_graph(),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };
         if let Err(err) = result {
