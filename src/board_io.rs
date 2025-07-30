@@ -267,7 +267,10 @@ impl Board {
         // sequence of moves
         for move_string in toks {
             let m = board.parse_action(move_string)?;
-            board.do_action(m); // TODO: check move legality
+            if !board.is_legal(m) {
+                return Err(UhpError::InvalidMove(move_string.to_owned()));
+            }
+            board.do_action(m);
         }
         Ok(board)
     }

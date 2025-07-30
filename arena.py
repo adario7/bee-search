@@ -1,3 +1,4 @@
+from io import text_encoding
 import subprocess
 import threading
 import queue
@@ -12,7 +13,7 @@ try:
     from tqdm import tqdm
 except:
     progress_bar = False
-timeout = 5  # default timeout per move
+THINK_TOL = 0.1  # tolerance for timeout
 maxmoves = 200 # maximum number of moves per player per game
 
 class Engine:
@@ -36,6 +37,13 @@ class Engine:
         self.stderr_log_file = open(f"logs/{self.name}_stderr.log","w")
         threading.Thread(target=self._read_stderr, daemon=True).start()
 
+        # nokamute format
+        self.command("options set NumThreads 1")
+        self.command("options set TableSizeMiB 256") # max value
+        # mzinga format
+        self.command("options set MaxHelperThreads None")
+        self.command("options set TranspositionTableSizeMB 1024") # max value
+
     def _reader(self):
         for line in self.proc.stdout:
             self._stdout_queue.put(line)
@@ -50,6 +58,10 @@ class Engine:
         if self.proc.stdin:
             self.proc.stdin.write(text + "\n")
             self.proc.stdin.flush()
+
+    def command(self, text, timout=None):
+        self.send(text)
+        return self.receive(timeout=timout)
 
     def receive(self, timeout=None):
         lines = []
@@ -219,7 +231,7 @@ class HiveArena:
         selected_indices = np.random.choice(len(self.engine_paths), size=2, replace=False, p=weights)
         return self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
 
-    def play_match(self, white_path, black_path, update_elo = False, verbose = False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
+    def play_match(self, white_path, black_path, update_elo, verbose, timeout, maxmoves, random_moves):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
 
@@ -250,7 +262,7 @@ class HiveArena:
 
                 if n_moves >= random_moves:
                     engine.send(f"bestmove time {seconds_to_hh(timeout)}")
-                    move = engine.receive(timeout=timeout + 1)
+                    move = engine.receive(timeout=timeout + THINK_TOL)
 
                     if len(move)==0:
                         raise TimeoutError(f"[{color}] timed out or no move")
@@ -319,7 +331,7 @@ class HiveArena:
             "random_moves": random_moves
         }
 
-    def continuous_matches(self, engine_paths_file, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
+    def continuous_matches(self, engine_paths_file, update_elo, verbose, timeout, maxmoves, random_moves):
         """Run matches continuously, reloading engine list after each match"""
         match_count = 0
         
@@ -380,7 +392,7 @@ class HiveArena:
                 print(f"Error during match: {e}")
                 time.sleep(1)
 
-    def all_v_all(self, n_matches = 1, update_elo=False, verbose=False, timeout=timeout, maxmoves=maxmoves, random_moves=0):
+    def all_v_all(self, n_matches, update_elo, verbose, timeout, maxmoves, random_moves):
         n_engines = len(self.engine_paths)
 
         matches = []
@@ -409,12 +421,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Hive bot arena')
     parser.add_argument("--engine_paths", type=str, default="logs/paths.txt", help="File containing paths to the engine executables")
     parser.add_argument("--n_matches", type=int, default=1, help="Number of matches")
-    parser.add_argument("--update_elo", type=bool, default=True, help="If the elo gets updated")
+    parser.add_argument("--update-elo", type=bool, default=True, help="If the elo gets updated")
     parser.add_argument("--verbose", type=bool, default=False, help="Display info about matches in real time")
-    parser.add_argument("--results_folder", type=str, default="logs/", help="Folder where the matches are stored")
-    parser.add_argument("--timeout", type=float, default=timeout, help="Time per move")
+    parser.add_argument("--results-folder", type=str, default="logs/", help="Folder where the matches are stored")
+    parser.add_argument("--timeout", type=float, default=5, help="Time per move")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
-    parser.add_argument("--random_moves", type=int, default=0, help="Number of initial random moves")
+    parser.add_argument("--random-moves", type=int, default=0, help="Number of initial random moves")
     parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
     args = parser.parse_args()
 

@@ -46,7 +46,7 @@ pub struct Board {
     pub turn_history: Vec<Action>,
     // placeable tiles for both players
     // a tile is placeable for a player if he can put a piece that is not present on the board on it
-    pub tiles_placeable: [TileBitmask; 2],
+    pub tiles_placeable: [TileSet; 2],
 
     pub zobrist_table: &'static [u64; GRID_SIZE * 2],
     pub zobrist_hash: u64,
@@ -77,7 +77,7 @@ impl Board {
             occupied_tiles: [Vec::new(), Vec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
-            tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
+            tiles_placeable: [TileSet::new(), TileSet::new()],
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
@@ -114,7 +114,7 @@ impl Board {
             occupied_tiles: [Vec::new(), Vec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
-            tiles_placeable: [TileBitmask::new(false), TileBitmask::new(false)],
+            tiles_placeable: [TileSet::new(), TileSet::new()],
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
@@ -129,6 +129,10 @@ impl Board {
         self.world[tile as usize]
     }
 
+    pub fn occupied(&self, tile: Tile) -> bool {
+        self.tile(tile).is_some()
+    }
+
     pub fn queen_required(&self) -> bool {
         self.turn_num > 5 && self.placeable[self.color().index()][PieceType::Queen as usize] > 0 
     }
@@ -139,6 +143,10 @@ impl Board {
         }
         return (self.world[tile as usize] != Piece::empty()) as i32;
     } 
+
+    pub fn is_stacked(&self, tile: Tile) -> bool {
+        self.height(tile) > 1
+    }
 
     fn zobrist(&self, t: Tile, p: Piece, h: u32) -> u64 {
         let hash = self.zobrist_table[((t as usize) << 1) | (p.color() as usize)];
@@ -207,6 +215,11 @@ impl Board {
         let num = 1 + TOT_QTY[pct as usize] - self.placeable[self.color().index()][pct as usize];
         debug_assert!(0 < num && num < 4);
         Piece::make(self.color(), pct, num)
+    }
+
+    /// very slow!
+    pub fn is_legal(&self, action: Action) -> bool {
+        self.generate_moves().contains(&action)
     }
 
     /// assumes the action is legal

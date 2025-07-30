@@ -2,32 +2,32 @@ use crate::tile::{Tile, GRID_SIZE};
 use crate::board::Action;
 use std::collections::HashSet;
 
+const TILESET_NUM_WORDS: usize = GRID_SIZE / 32;
+const TILESET_SHIFT: u32 = GRID_SIZE.trailing_zeros() - 5;
+const TILESET_MASK: usize = TILESET_NUM_WORDS - 1;
 
 #[derive(Clone)]
-pub struct TileBitmask{
-    set : [bool; GRID_SIZE],
+pub struct TileSet {
+    table: [u32; TILESET_NUM_WORDS],
 }
 
-impl TileBitmask{
-    
-    pub fn new(value: bool) -> Self{
-        TileBitmask{
-            set: [value; GRID_SIZE],
-        }
+impl TileSet {
+    pub(crate) fn new() -> TileSet {
+        TileSet { table: [0; TILESET_NUM_WORDS] }
     }
 
-    pub fn is_on(&self, tile : Tile) -> bool {
-        return self.set[tile as usize];
+    pub(crate) fn set(&mut self, tile: Tile) {
+        self.table[tile as usize & TILESET_MASK] |= 1 << (tile as u32 >> TILESET_SHIFT);
     }
 
-    pub fn set_bit(&mut self, tile: Tile, value: bool){
-        self.set[tile as usize] = value;
+    pub(crate) fn get(&self, tile: Tile) -> bool {
+        (self.table[tile as usize & TILESET_MASK] >> (tile as u32 >> TILESET_SHIFT)) & 1 != 0
     }
 }
 
 pub struct ActionContainer {
-    pub moves : Vec<Action>,
-    hashed_moves : HashSet<i32>,
+    pub moves: Vec<Action>,
+    hashed_moves: HashSet<i32>,
 }
 
 const GRID_SIZE_32: i32 = GRID_SIZE as i32;
@@ -42,7 +42,6 @@ impl ActionContainer {
     }
 
     pub fn push(&mut self, action: Action) {
-
         let hash = match action {
             Action::Place(tile, piece ) => {
                 GRID_SIZE_32 * (piece as i32) + (tile as i32)
