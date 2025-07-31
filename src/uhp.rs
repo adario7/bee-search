@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::perft;
+use crate::graph_nn::GameGraph;
 
 pub struct Uhp {
     board: Board,
@@ -157,21 +158,21 @@ impl Uhp {
     }
 
     fn print_graph(&self) -> UhpResult<()> {
-        let (nodes, edges, features) = self.board.get_graph();
-        println!("{}", nodes.len());
-        for node in &nodes {
+        let graph = self.board.get_graph();
+        println!("{} ", graph.nodes.len());
+        for node in &graph.nodes {
             println!("{} ", node);
         }
-        for feature in &features {
+        for feature in &graph.features {
             for f in feature {
                 print!("{} ", f);
             }
             println!();
         }
-        println!("{}", edges.len());
-        for i in 0..edges.len() {
-            for j in 0..edges[i].len() {
-                print!("{} ", edges[i][j] as u8);
+        println!("{}", graph.edges.len());
+        for i in 0..graph.edges.len() {
+            for j in 0..graph.edges[i].len() {
+                print!("{} ", graph.edges[i][j] as u8);
             }
             println!()
         }
