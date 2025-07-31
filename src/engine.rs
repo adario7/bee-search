@@ -401,9 +401,9 @@ impl Engine {
         panic!();
     }
 
-    fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> Action {
+    fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> (Value, Action) {
         self.tt.clear_one(board.zobrist_hash); // make sure the root TT is available
-        let mut incumbent = *board.generate_moves().first().unwrap_or(&Action::Pass);
+        let mut incumbent = (0, *board.generate_moves().first().unwrap_or(&Action::Pass));
         let mut prev_nodes = self.nnodes;
         for depth in 1..=max_depth {
             let start = Instant::now();
@@ -416,22 +416,18 @@ impl Engine {
             }
             let score = score.unwrap();
             if let Some(entry) = option {
-                incumbent = entry.pv;
-                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent), self.nnodes - prev_nodes, elapsed.as_millis());
+                incumbent = (score, entry.pv);
+                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent.1), self.nnodes - prev_nodes, elapsed.as_millis());
             } else {
                 eprintln!("depth {}: could not find matching tt entry", depth);
             }
-            debug_assert!(board.is_legal(incumbent));
+            debug_assert!(board.is_legal(incumbent.1));
             prev_nodes = self.nnodes;
         }
         incumbent
     }
 
-    pub fn eval(&mut self, board: &mut Board, depth: Depth) -> Option<Value> {
-        self.aspiration_search(board, depth)
-    }
-
-    pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> Action {
+    pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> (Value, Action) {
         let start = Instant::now();
         self.nnodes = 0;
         self.qsnodes = 0;

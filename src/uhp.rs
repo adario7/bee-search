@@ -93,7 +93,7 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let m = self.engine.best_move(&mut self.board, depth, time);
+        let (_, m) = self.engine.best_move(&mut self.board, depth, time);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -148,13 +148,9 @@ impl Uhp {
 
     fn eval(&mut self, args: &str) -> UhpResult<()> {
         let depth = args.parse::<u8>().unwrap_or(5);
-        if let Some(eval) = self.engine.eval(&mut self.board, depth){
-            println!("{}", eval);
-            Ok(())
-        }else{
-            Err(UhpError::EngineError("Engine unable to find evaluation".to_owned()))
-        }
-        
+        let (score, _) = self.engine.best_move(&mut self.board, depth, Duration::from_secs(99999));
+        println!("{}", score);
+        Ok(())
     }
 
     fn print_graph(&self) -> UhpResult<()> {
