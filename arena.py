@@ -246,7 +246,7 @@ class HiveArena:
 
         prev_position = self.starting_position
         moves = []
-    
+        error = None
 
         while True:
             try:
@@ -290,14 +290,12 @@ class HiveArena:
                 turn ^= 1
                 n_moves += 1
             except TimeoutError as e:
+                error = str(e)
                 print(e)
                 print(f"Unable to connnect with engine {engine.name}")
-                result = input("If you want to go on with the next match type \"Y\": ")
-                if result.lower() == 'y':
-                    break
-                else:
-                    exit(0)
+                break
             except IndexError as e:
+                error = str(e)
                 print(e)
                 print("Probably an invalid move was made in this position:")
                 print(prev_position)
@@ -309,11 +307,14 @@ class HiveArena:
         if n_moves > maxmoves*2:
             if verbose:
                 print("Maximum number of moves exceeded")
+            winner = "draw"
+        else:
+            winner = get_winner_from_gamestate(position)
+
         if verbose:
             print("Final position: ", position)
 
         if update_elo:
-            winner = get_winner_from_gamestate(position)
             if verbose:
                 print(f"Winner: {winner}")
             if winner != "other" and n_moves > random_moves:
@@ -322,7 +323,7 @@ class HiveArena:
         engines[0].terminate()
         engines[1].terminate()
 
-        return {
+        result = {
             "white": engines[0].name,
             "black": engines[1].name,
             "winner": winner,
@@ -331,6 +332,8 @@ class HiveArena:
             "move_duration": timeout,
             "random_moves": random_moves
         }
+        if error: result["error"] = error
+        return result
 
     def continuous_matches(self, engine_paths_file, update_elo, verbose, timeout, maxmoves, random_moves):
         """Run matches continuously, reloading engine list after each match"""
