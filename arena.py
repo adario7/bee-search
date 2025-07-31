@@ -421,6 +421,15 @@ class HiveArena:
             self.save_results()
             self.save_ratings()
 
+def load_engines_with_names(engine_paths_file="logs/paths.txt"):
+    engine_paths = []
+    names = []
+    with open(engine_paths_file) as f:
+        for path in f:
+            engine_paths.append(path.replace('\n','').replace('\\','/'))
+            names.append(path_to_name(engine_paths[-1]))
+    return engine_paths, names
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Hive bot arena')
     parser.add_argument("--engine_paths", type=str, default="logs/paths.txt", help="File containing paths to the engine executables")
@@ -434,12 +443,7 @@ if __name__ == '__main__':
     parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
     args = parser.parse_args()
 
-    engine_paths = []
-    names = []
-    with open(args.engine_paths) as f:
-        for path in f:
-            engine_paths.append(path.replace('\n','').replace('\\','/')) # sì ok, uso ancora Windows 
-            names.append(path_to_name(engine_paths[-1]))
+    engine_paths, names = load_engines_with_names(args.engine_paths)
 
     # check wether two different engines have the same path or name
     n_engines = len(engine_paths)
