@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
+//use crate::graph_nn::GnnEvaluator;
 
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
@@ -11,6 +12,8 @@ use std::sync::OnceLock;
 
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
+
+static GNN_PATH: &str = "models/hive_gnn.onnx";
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -51,6 +54,8 @@ pub struct Board {
     pub zobrist_table: &'static [u64; GRID_SIZE * 2],
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
+
+//    pub gnn: GnnEvaluator,
 }
 
 const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -81,6 +86,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
+//            gnn: GnnEvaluator::new(GNN_PATH),
         }
     }
 
@@ -118,6 +124,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
+ //           gnn: GnnEvaluator::new(GNN_PATH),
         }
     }
 

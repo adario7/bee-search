@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::perft;
+use crate::graph_nn::GameGraph;
 
 pub struct Uhp {
     board: Board,
@@ -145,9 +146,36 @@ impl Uhp {
         Ok(())
     }
 
-    fn eval(&mut self, _args: &str) -> UhpResult<()> {
-        let eval = self.board.static_eval();
-        println!("{}", eval);
+    fn eval(&mut self, args: &str) -> UhpResult<()> {
+        let depth = args.parse::<u8>().unwrap_or(5);
+        if let Some(eval) = self.engine.eval(&mut self.board, depth){
+            println!("{}", eval);
+            Ok(())
+        }else{
+            Err(UhpError::EngineError("Engine unable to find evaluation".to_owned()))
+        }
+        
+    }
+
+    fn print_graph(&self) -> UhpResult<()> {
+        let graph = self.board.get_graph();
+        println!("{} ", graph.nodes.len());
+        for node in &graph.nodes {
+            println!("{} ", node);
+        }
+        for feature in &graph.features {
+            for f in feature {
+                print!("{} ", f);
+            }
+            println!();
+        }
+        println!("{}", graph.edges.len());
+        for i in 0..graph.edges.len() {
+            for j in 0..graph.edges[i].len() {
+                print!("{} ", graph.edges[i][j] as u8);
+            }
+            println!()
+        }
         Ok(())
     }
 
@@ -169,6 +197,7 @@ impl Uhp {
             // secret commands
             "perft" => self.perft(args),
             "eval" => self.eval(args),
+            "graph" => self.print_graph(),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };
         if let Err(err) = result {
