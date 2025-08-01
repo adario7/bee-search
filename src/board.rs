@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
-//use crate::graph_nn::GnnEvaluator;
+use crate::graph_nn::GnnEvaluator;
 
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
@@ -55,7 +55,7 @@ pub struct Board {
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
 
-//    pub gnn: GnnEvaluator,
+    pub gnn: std::sync::Arc<GnnEvaluator>,
 }
 
 const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -86,7 +86,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
-//            gnn: GnnEvaluator::new(GNN_PATH),
+            gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
     }
 
@@ -124,7 +124,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
- //           gnn: GnnEvaluator::new(GNN_PATH),
+            gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
     }
 

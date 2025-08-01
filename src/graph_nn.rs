@@ -1,11 +1,5 @@
 use ndarray::Array2;
-use ort::environment::Environment;
-use ort::session::builder::GraphOptimizationLevel;
-use ort::session::Session;
-use ort::session::builder::SessionBuilder;
-use ort::value::Value;
-use ort::execution_providers::{CUDAExecutionProvider, CPUExecutionProvider};
-use ort::value::Tensor;
+use ort::{Environment, GraphOptimizationLevel, Session, SessionBuilder, Value};
 use std::sync::Arc;
 use crate::board::Board;
 use crate::tile::{adjacent, Tile, GRID_SIZE, TILE_ZERO};
@@ -96,7 +90,7 @@ impl Board {
         GameGraph { nodes, edges, features }
     }
 }
-/* 
+
 #[derive(Debug)]
 pub enum GnnError {
     ModelLoad(String),
@@ -117,36 +111,32 @@ impl std::fmt::Display for GnnError {
 impl std::error::Error for GnnError {}
 
 pub struct GnnEvaluator {
-    session: Session,
-    node_feature_dim: usize,
-    max_nodes: usize,
+    session: Arc<Session>,
+    environment: Arc<Environment>,
 }
 
 impl GnnEvaluator {
     /// Load the ONNX model from file
-    fn new(model_path: &str, node_feature_dim: usize, max_nodes: usize) -> Result<Self, GnnError> {
-        // Initialize environment with GPU support
-        ort::init()
-            .with_execution_providers([
-                CUDAExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build(),
-            ])
-            .commit()
-            .map_err(|e| GnnError::ModelLoad(format!("Failed to create environment: {}", e)))?;
+    pub fn new(model_path: &str) -> Result<Self, GnnError> {
+        let environment = Arc::new(
+            Environment::builder()
+                .with_name("hive_gnn")
+                .build()
+                .map_err(|e| GnnError::ModelLoad(format!("Failed to create environment: {}", e)))?
+        );
 
-        let session = Session::builder()
+        let session = SessionBuilder::new(&environment)
             .map_err(|e| GnnError::ModelLoad(format!("Failed to create session builder: {}", e)))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| GnnError::ModelLoad(format!("Failed to set optimization level: {}", e)))?
-            .with_intra_threads(4)
+            .with_intra_threads(1)
             .map_err(|e| GnnError::ModelLoad(format!("Failed to set thread count: {}", e)))?
-            .commit_from_file(model_path)
+            .with_model_from_file(model_path)
             .map_err(|e| GnnError::ModelLoad(format!("Failed to load model: {}", e)))?;
 
-        Ok(Self {
-            session,
-            node_feature_dim,
-            max_nodes,
+        Ok(Self { 
+            session: Arc::new(session),
+            environment,
         })
     }
 
@@ -199,14 +189,19 @@ impl GnnEvaluator {
             edge_list
         ).map_err(|e| GnnError::Inference(format!("Failed to create edge index array: {}", e)))?;
 
-        // Get the allocator from the session
-        let allocator = self.session.allocator();
+        // Convert to dynamic dimension arrays
+        let node_features_dyn = node_features_array.into_dyn();
+        let edge_index_dyn = edge_index_array.into_dyn();
 
-        // Convert to ONNX Runtime Values
-        let node_features_tensor = Tensor::from_array(node_features_array.into_dyn())
+        // Convert to CowArray for ONNX Runtime Values
+        use ndarray::CowArray;
+        let node_features_cow = CowArray::from(node_features_dyn);
+        let edge_index_cow = CowArray::from(edge_index_dyn);
+
+        let node_features_tensor = Value::from_array(self.session.allocator(), &node_features_cow)
             .map_err(|e| GnnError::Inference(format!("Failed to create node features tensor: {}", e)))?;
 
-        let edge_index_tensor = Tensor::from_array(edge_index_array.into_dyn())
+        let edge_index_tensor = Value::from_array(self.session.allocator(), &edge_index_cow)
             .map_err(|e| GnnError::Inference(format!("Failed to create edge index tensor: {}", e)))?;
 
         // Run inference
@@ -220,18 +215,17 @@ impl GnnEvaluator {
             .ok_or_else(|| GnnError::Inference("No output from model".to_string()))?;
 
         // Extract the scalar value
-        let output_tensor = output
+        let extracted = output
             .try_extract::<f32>()
-            .map_err(|e| GnnError::Inference(format!("Failed to extract tensor: {}", e)))?
-            .view();
+            .map_err(|e| GnnError::Inference(format!("Failed to extract tensor: {}", e)))?;
+        let output_tensor = extracted.view();
         
         let evaluation = output_tensor
             .iter()
             .next()
+            .copied()
             .ok_or_else(|| GnnError::Inference("Output tensor is empty".to_string()))?;
 
         Ok(evaluation * 6000.0) // Scale the output to match the game score range
     }
 }
-
-    */
