@@ -69,12 +69,14 @@ def load_results(results_file):
         return json.load(f)
 
 def get_positions_from_results(results_paths, engine):
+
     positions = []
 
     for path in results_paths:
+        print(f"Extracting positions from results in {path}...")
         results = load_results(path)
 
-        for result in results:
+        for result in tqdm(results):
             tmp = result["final_gamestate"].split(';')
             
             gametype = tmp[0]
@@ -93,7 +95,10 @@ def get_positions_from_results(results_paths, engine):
                 
                 positions.append(position[0])
 
-    return set(positions)
+    positions = set(positions)
+    print(f"Extracted {len(positions)} positions.")
+
+    return positions
 
 def get_graph_from_positions(positions, engine):
 
@@ -184,7 +189,7 @@ if __name__ == "__main__":
     positions = list(get_positions_from_results(args.results_paths, engine))
     
     current_engine_name = engine.name
-
+    """
     # Plan the evaluation run
     positions_to_eval, evals_map = plan_evaluation_run(positions, args.evals_path, args.depth, current_engine_name, args.reevaluate)
 
@@ -202,7 +207,7 @@ if __name__ == "__main__":
     with open(args.evals_path, "w") as f:
         json.dump(list(evals_map.values()), f, indent=1)
     print(f"Evaluations saved to {args.evals_path}")
-
+"""
     graphs = get_graph_from_positions(positions=positions, engine=engine)
     with open("logs/graphs.pkl", "wb") as f:
         pickle.dump(graphs, f)
