@@ -434,6 +434,8 @@ def load_engines_with_names(engine_paths_file="logs/paths.txt"):
     names = []
     with open(engine_paths_file) as f:
         for path in f:
+            if path.startswith("#"):
+                continue
             engine_paths.append(path.replace('\n','').replace('\\','/'))
             names.append(path_to_name(engine_paths[-1]))
     return engine_paths, names
