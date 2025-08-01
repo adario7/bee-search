@@ -13,6 +13,8 @@ try:
     from tqdm import tqdm
 except:
     progress_bar = False
+
+MAX_THINK_TIME = 120  # maximum time for the engine to think (used if depth is used instead of timeout)
 THINK_TOL = 0.1  # tolerance for timeout
 maxmoves = 200 # maximum number of moves per player per game
 
@@ -231,7 +233,7 @@ class HiveArena:
         selected_indices = np.random.choice(len(self.engine_paths), size=2, replace=False, p=weights)
         return self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
 
-    def play_match(self, white_path, black_path, update_elo, verbose, timeout, maxmoves, random_moves):
+    def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
 
@@ -269,8 +271,12 @@ class HiveArena:
                 if n_moves < random_moves:
                     move = str(np.random.choice(validmoves))
                 else:
-                    engine.send(f"bestmove time {seconds_to_hh(timeout)}")
-                    move = engine.receive(timeout=timeout + THINK_TOL)
+                    if depth > 0:
+                        engine.send(f"bestmove depth {depth}")
+                        move = engine.receive(timeout=MAX_THINK_TIME)
+                    else:
+                        engine.send(f"bestmove time {seconds_to_hh(timeout)}")
+                        move = engine.receive(timeout=timeout + THINK_TOL)
                     if len(move)==0:
                         raise TimeoutError(f"[{color}] timed out or no move")
                     move = move[0]
@@ -335,7 +341,7 @@ class HiveArena:
         if error: result["error"] = error
         return result
 
-    def continuous_matches(self, engine_paths_file, update_elo, verbose, timeout, maxmoves, random_moves):
+    def continuous_matches(self, engine_paths_file, update_elo, verbose, timeout, depth, maxmoves, random_moves):
         """Run matches continuously, reloading engine list after each match"""
         match_count = 0
         
@@ -384,6 +390,7 @@ class HiveArena:
                                         update_elo=update_elo, 
                                         verbose=verbose,
                                         timeout=timeout,
+                                        depth=depth,
                                         maxmoves=maxmoves,
                                         random_moves=random_moves)
                 self.results.append(result)
@@ -396,7 +403,7 @@ class HiveArena:
                 print(f"Error during match: {e}")
                 time.sleep(1)
 
-    def all_v_all(self, n_matches, update_elo, verbose, timeout, maxmoves, random_moves):
+    def all_v_all(self, n_matches, update_elo, verbose, timeout, depth, maxmoves, random_moves):
         n_engines = len(self.engine_paths)
 
         matches = []
@@ -414,6 +421,7 @@ class HiveArena:
                                     update_elo=update_elo, 
                                     verbose=verbose,
                                     timeout=timeout,
+                                    depth=depth,
                                     maxmoves=maxmoves,
                                     random_moves=random_moves)
             self.results.append(result)
@@ -437,10 +445,13 @@ if __name__ == '__main__':
     parser.add_argument("--update-elo", type=bool, default=True, help="If the elo gets updated")
     parser.add_argument("--verbose", type=bool, default=False, help="Display info about matches in real time")
     parser.add_argument("--results-folder", type=str, default="logs/", help="Folder where the matches are stored")
-    parser.add_argument("--timeout", type=float, default=5, help="Time per move")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
     parser.add_argument("--random-moves", type=int, default=0, help="Number of initial random moves")
     parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
+    
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument("--timeout", type=float, default=5, help="Time per move")
+    group.add_argument("--depth", type=int, default=0, help="Depth for engine evaluation (not used in arena)")
     args = parser.parse_args()
 
     engine_paths, names = load_engines_with_names(args.engine_paths)
@@ -464,6 +475,7 @@ if __name__ == '__main__':
                                 update_elo=args.update_elo, 
                                 verbose=args.verbose, 
                                 timeout=args.timeout, 
+                                depth=args.depth,
                                 maxmoves=args.maxmoves,
                                 random_moves=args.random_moves)
     else:
@@ -471,6 +483,7 @@ if __name__ == '__main__':
                         update_elo=args.update_elo, 
                         verbose=args.verbose, 
                         timeout = args.timeout, 
+                        depth=args.depth,
                         maxmoves = args.maxmoves,
                         random_moves=args.random_moves)
 
