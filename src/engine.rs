@@ -18,7 +18,9 @@ pub struct Engine {
     // map move -> history score 
     history_h: Vec<i64>,
     // map move -> countermove producing a beta cutoff
-    countermove: Vec<Action>
+    countermove: Vec<Action>,
+    // LMR table
+    reductions: Vec<f32>
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -32,8 +34,26 @@ struct MoveInfo {
 const KILLER_N: usize = 2;
 type KillerT = [(Action, u8); KILLER_N];
 
+struct PendingMove<'a> {
+    board: &'a mut Board,
+}
+impl Board {
+    fn play_pending(&mut self, mv: Action) -> PendingMove {
+        self.do_action(mv);
+        PendingMove { board: self }
+    }
+}
+impl Drop for PendingMove<'_> {
+    fn drop(&mut self) {
+        self.board.undo_action();
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
+        let reductions = (0..1024).map(|i| if i == 0 { 0.0 } else {
+            0.68 * (i as f32).ln()
+        }).collect();
         Self {
             nnodes: 0,
             qsnodes: 0,
@@ -41,6 +61,7 @@ impl Engine {
             tt: TTable::new(1 << 28), // TODO: make this configurable
             history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
             countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+            reductions
         }
     }
 
@@ -154,16 +175,20 @@ impl Engine {
         }
     }
 
-    // principal variation search
-    fn pvs(&mut self, board: &mut Board, nply: Depth, ndepth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, full_search: bool) -> Option<Value> {
-        if full_search {
+    // principal variation search with LMR
+    fn pvs(&mut self, board: &mut Board, ply: Depth, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, move_index: usize) -> Option<Value> {
+        let nply = ply + 1;
+        let ndepth = depth - 1;
+        if move_index == 0 || depth < 2 {
             // search the first move with the full window
             self.minimax(board, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
-            let mut score = -self.minimax(board, nply, ndepth, -(alpha+1), -alpha, killers)?;
-            // if the null window search fails, search again with a full window
-            if score > alpha && beta > 1 + alpha {
+            let r = self.reductions[move_index] * self.reductions[depth as usize] + 1.05;
+            let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).ceil() as Depth;
+            let mut score = -self.minimax(board, nply, d, -(alpha+1), -alpha, killers)?;
+            // if the reduced null window search fails, search again with a full window
+            if score > alpha && (beta > 1 + alpha || d < ndepth) {
                 score = -self.minimax(board, nply, ndepth, -beta, -alpha, killers)?;
             }
             Some(score)
@@ -176,7 +201,7 @@ impl Engine {
                 let mv = board.generate_moves();
                 let len = mv.len();
                 *moves = Some(mv);
-                let e = board.gnn_eval();
+                let e = board.static_eval_fast(len);
                 self.tt.put_eval(board.zobrist_hash, e);
                 e
             })
@@ -236,9 +261,9 @@ impl Engine {
         let moves = self.order_moves(moves, board, pv, killers);
         for mvi in moves.iter() {
             let mv = mvi.mv;
-            board.do_action(mv);
-            let opt = self.qsearch(board, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
-            board.undo_action();
+            let pending = board.play_pending(mv);
+            let opt = self.qsearch(pending.board, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
+            drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
                 best_move = Some((value, *mvi));
@@ -259,6 +284,7 @@ impl Engine {
 
 
     fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+        let initial_hash = board.zobrist_hash;
         // out of time case
         if Instant::now() > self.deadline {
             return None;
@@ -302,16 +328,16 @@ impl Engine {
         if depth > NMR && ply > 0 {
             let eval = self.eval_with_caches(board, entry, &mut moves);
             if eval >= beta {
+                let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
-                board.do_action(Action::Pass);
-                let value = -self.minimax(board, ply+1, depth - NMR, -beta, -beta + 1, &mut nm_klr)?;
-                board.undo_action();
+                let pending = board.play_pending(Action::Pass);
+                let value = -self.minimax(pending.board, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
+                drop(pending);
                 if value >= beta {
                     return Some(self.fail_high(value, beta));
                 }
             }
         }
-
 
         let moves = moves.unwrap_or_else(|| board.generate_moves());
         let moves = self.order_moves(moves, board, pv, killers);
@@ -319,12 +345,11 @@ impl Engine {
         let mut best_move: Option<(Value, MoveInfo)> = None;
         let mut child_klr = Default::default();
         let mut explored_quiet = 0;
-        for mvi in moves.iter() {
+        for (move_idx, mvi) in moves.iter().enumerate() {
             let mv = mvi.mv;
-            let first_move = mv == moves[0].mv || depth <= 2;
-            board.do_action(mv);
-            let opt = self.pvs(board, ply + 1, depth - 1, alpha, beta, &mut child_klr, first_move);
-            board.undo_action();
+            let pending = board.play_pending(mv);
+            let opt = self.pvs(pending.board, ply, depth, alpha, beta, &mut child_klr, move_idx);
+            drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
                 best_move = Some((value, *mvi));
@@ -348,6 +373,7 @@ impl Engine {
             self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, None, ply, depth);
         }
 
+        debug_assert!(board.zobrist_hash == initial_hash);
         Some(alpha)
     }
 
@@ -360,7 +386,9 @@ impl Engine {
         let mut beta = guess.map(|v| v as i64 + W).unwrap_or(INF as i64);
         let mut root_klr = Default::default();
         for i in 0.. {
+            let initial_hash = board.zobrist_hash;
             let value = self.minimax(board, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
+            debug_assert!(board.zobrist_hash == initial_hash);
             // when search fails, grow the window exponentially
             if value as i64 <= alpha {
                 alpha = (alpha - W * (1 << i)).min(value as i64 - 1).max(-INF as i64);
