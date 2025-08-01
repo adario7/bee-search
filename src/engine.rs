@@ -201,7 +201,7 @@ impl Engine {
                 let mv = board.generate_moves();
                 let len = mv.len();
                 *moves = Some(mv);
-                let e = board.static_eval_fast(len);
+                let e = board.gnn_eval();
                 self.tt.put_eval(board.zobrist_hash, e);
                 e
             })
