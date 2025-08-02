@@ -134,6 +134,12 @@ def load_training_data(evals_path, graphs_path, device):
             ))
     return data_list
 
+def load_from_pth(model, model_path, device='cuda'):
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    return model
+
 def train_model(model, train_loader, val_loader, num_epochs=100, lr=0.001, device='cuda', export_folder='./'):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -186,10 +192,10 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=0.001, devic
 
 def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
     model.eval()
-    dummy_x = sample_data.x
-    dummy_edge_index = sample_data.edge_index
+    dummy_x = sample_data.x.to('cpu')
+    dummy_edge_index = sample_data.edge_index.to('cpu')
     torch.onnx.export(
-        model, 
+        model.to('cpu'),
         (dummy_x, dummy_edge_index),
         onnx_path,
         export_params=True,
@@ -201,9 +207,13 @@ def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
     )
     print(f"Model exported to {onnx_path}")
 
-def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False,
+
+
+
+def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None,
             hidden_dim=64, num_gnn_layers=3, dropout=0.2, export_folder='./'):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     data_list = load_training_data(evals_path, graphs_path, device)
     train_data, val_data = train_test_split(data_list, test_size=0.2, random_state=42)
@@ -212,9 +222,15 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
     if use_gat:
         model = HiveGNN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout, use_gat=True)
         print("Using GAT model (requires ONNX opset 16+)")
+        if model_path:
+            model = load_from_pth(model, model_path, device=device)
+            print(f"Loaded model from {model_path}")
     else:
         model = HiveGCN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout)
         print("Using GCN model (compatible with ONNX opset 11)")
+        if model_path:
+            model = load_from_pth(model, model_path, device=device)
+            print(f"Loaded model from {model_path}")
     print("Starting training...")
     train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=num_epochs, lr=lr, device=device, export_folder=export_folder)
     model.load_state_dict(torch.load(os.path.join(export_folder, 'best_hive_gnn.pth')))
@@ -247,6 +263,8 @@ if __name__ == "__main__":
                         help='Batch size for training.')
     parser.add_argument('--use_gat', action='store_true',
                         help='Use GAT layers instead of GCN.')
+    parser.add_argument('--load_from_pth', type=str, default=None,
+                        help='Path to a pre-trained model in .pth format.')
 
     parser.add_argument('--export_folder', type=str, default='./',
                         help='Folder to save the exported ONNX and pth model.')
@@ -258,7 +276,10 @@ if __name__ == "__main__":
                         help='Dropout rate for the GNN model.')
     args = parser.parse_args()
 
-    trainer(evals_path=args.evals_path, graphs_path=args.graphs_path, num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size, use_gat=args.use_gat,
+    # Log arguments
+    print(f"Arguments: {args}")
+
+    trainer(evals_path=args.evals_path, graphs_path=args.graphs_path, num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size, use_gat=args.use_gat, model_path=args.load_from_pth,
             hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
             export_folder=args.export_folder)
     print("Done!")
