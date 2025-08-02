@@ -38,7 +38,7 @@ impl Board {
         }
         feat[1] = 1.0; // Occupied tile
         // Color one-hot
-        feat[2 + piece.color().index()] = 1.0;
+        feat[2 + (self.color().index() ^ piece.color().index())] = 1.0;
         // Piece type one-hot
         feat[2 + 2 + piece.ptype().index()] = 1.0;
         feat
