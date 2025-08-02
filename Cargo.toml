@@ -14,3 +14,6 @@ indicatif = "0.17.11"
 clap = { version = "4.4", features = ["derive"] }
 ort = "1.16"
 ndarray = "0.15"
+
+[features]
+gnn = []

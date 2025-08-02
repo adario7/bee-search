@@ -4,7 +4,6 @@ use std::time::Duration;
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::perft;
-use crate::graph_nn::GameGraph;
 
 pub struct Uhp {
     board: Board,
@@ -44,12 +43,18 @@ impl Uhp {
     fn info(&mut self) -> UhpResult<()> {
         let version = env!("CARGO_PKG_VERSION");
         let hash = env!("GIT_HASH");
+        
         let profile = if cfg!(debug_assertions) {
             "-DEBUG"
         } else {
             ""
         };
-        println!("id bee-search {}-{}{}", version, hash, profile);
+        print!("id bee-search {}-{}{}", version, hash, profile);
+        #[cfg(feature = "gnn")]
+        {
+            print!("-GNN");
+        }
+        println!();
         println!("Mosquito;Ladybug;Pillbug");
         Ok(())
     }
