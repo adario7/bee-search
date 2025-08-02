@@ -100,18 +100,18 @@ class HiveGCN(nn.Module):
         evaluation = self.mlp_head(global_repr)
         return torch.tanh(evaluation)
 
-def create_node_features(board_state):
-    return torch.tensor(board_state, dtype=torch.float32)
+def create_node_features(board_state, device):
+    return torch.tensor(board_state, dtype=torch.float32, device=device)
 
-def create_adjacency_matrix(adjacency_matrix):
+def create_adjacency_matrix(adjacency_matrix, device):
     edges = np.nonzero(adjacency_matrix)
     edge_list = list(zip(edges[0], edges[1]))
     if len(edge_list) == 0:
         num_nodes = adjacency_matrix.shape[0]
-        return torch.zeros((2, 0), dtype=torch.long)
-    return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+        return torch.zeros((2, 0), dtype=torch.long, device=device)
+    return torch.tensor(edge_list, dtype=torch.long, device=device).t().contiguous()
 
-def load_training_data(evals_path, graphs_path):
+def load_training_data(evals_path, graphs_path, device):
     from evaluator import load_results
     evals = load_results(evals_path)
     with open(graphs_path, "rb") as f:
@@ -128,9 +128,9 @@ def load_training_data(evals_path, graphs_path):
             evaluation = eval["evaluation"]
             evaluation = np.clip(evaluation, -6000, 6000) / 6000.0
             data_list.append(Data(
-                x=create_node_features(features),
-                edge_index=create_adjacency_matrix(edges),
-                y=torch.tensor([evaluation], dtype=torch.float32)
+                x=create_node_features(features, device),
+                edge_index=create_adjacency_matrix(edges, device),
+                y=torch.tensor([evaluation], dtype=torch.float32, device=device)
             ))
     return data_list
 
@@ -205,7 +205,7 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
             hidden_dim=64, num_gnn_layers=3, dropout=0.2, export_folder='./'):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    data_list = load_training_data(evals_path, graphs_path)
+    data_list = load_training_data(evals_path, graphs_path, device)
     train_data, val_data = train_test_split(data_list, test_size=0.2, random_state=42)
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
