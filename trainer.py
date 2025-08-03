@@ -111,7 +111,7 @@ def create_adjacency_matrix(adjacency_matrix, device):
         return torch.zeros((2, 0), dtype=torch.long, device=device)
     return torch.tensor(edge_list, dtype=torch.long, device=device).t().contiguous()
 
-def load_training_data(evals_path, graphs_path, device):
+def load_training_data(evals_path, graphs_path, device, dumb_train=False):
     from evaluator import load_results
     evals = load_results(evals_path)
     with open(graphs_path, "rb") as f:
@@ -125,7 +125,10 @@ def load_training_data(evals_path, graphs_path, device):
             features = graph["graph"][1]
             assert features.shape[1] == FEATURES_LEN, f"Feature length mismatch: {features.shape[1]} != FEATURES_LEN = {FEATURES_LEN}"
             edges = graph["graph"][2]
-            evaluation = eval["evaluation"]
+            if dumb_train:
+                evaluation = np.sum(features[:, 2] - features[:, 3])
+            else:
+                evaluation = eval["evaluation"]
             evaluation = np.clip(evaluation, -6000, 6000) / 6000.0
             data_list.append(Data(
                 x=create_node_features(features, device),
@@ -210,12 +213,12 @@ def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
 
 
 
-def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None,
+def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None, dumb_train=False,
             hidden_dim=64, num_gnn_layers=3, dropout=0.2, export_folder='./'):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    data_list = load_training_data(evals_path, graphs_path, device)
+    data_list = load_training_data(evals_path, graphs_path, device, dumb_train=dumb_train)
     train_data, val_data = train_test_split(data_list, test_size=0.2, random_state=42)
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
@@ -265,6 +268,8 @@ if __name__ == "__main__":
                         help='Use GAT layers instead of GCN.')
     parser.add_argument('--load_from_pth', type=str, default=None,
                         help='Path to a pre-trained model in .pth format.')
+    parser.add_argument('--dumb_train', action='store_true',
+                        help='Train the model predicting the difference between the current player\'s piece count and the opponent\'s piece count.')
 
     parser.add_argument('--export_folder', type=str, default='./',
                         help='Folder to save the exported ONNX and pth model.')
@@ -279,7 +284,8 @@ if __name__ == "__main__":
     # Log arguments
     print(f"Arguments: {args}")
 
+
     trainer(evals_path=args.evals_path, graphs_path=args.graphs_path, num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size, use_gat=args.use_gat, model_path=args.load_from_pth,
-            hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
+            dumb_train=args.dumb_train, hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
             export_folder=args.export_folder)
     print("Done!")
