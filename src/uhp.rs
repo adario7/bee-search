@@ -180,6 +180,12 @@ impl Uhp {
         Ok(())
     }
 
+    fn static_eval(&mut self) -> UhpResult<()> {
+        let score = self.board.static_eval();
+        println!("{}", score);
+        Ok(())
+    }
+
     // https://github.com/jonthysell/Mzinga/wiki/UniversalHiveProtocol#engine-commands
     fn command(&mut self, line: &str) {
         let line = line.trim();
@@ -199,6 +205,7 @@ impl Uhp {
             "perft" => self.perft(args),
             "eval" => self.eval(args),
             "graph" => self.print_graph(),
+            "static_eval" => self.static_eval(),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };
         if let Err(err) = result {

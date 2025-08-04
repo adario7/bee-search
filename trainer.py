@@ -10,6 +10,8 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+NORMAL_MODEL_PATH = "build/engines/normal/bee-search"
+
 FEATURES_LEN = 12
 
 class HiveGNN(nn.Module):
@@ -111,13 +113,36 @@ def create_adjacency_matrix(adjacency_matrix, device):
         return torch.zeros((2, 0), dtype=torch.long, device=device)
     return torch.tensor(edge_list, dtype=torch.long, device=device).t().contiguous()
 
-def load_training_data(evals_path, graphs_path, device, dumb_train=False):
+def get_static_eval(eval, engine):
+
+    engine.send(f"newgame {eval["position"]}")
+
+    engine.receive(1)
+
+    engine.send("static_eval")
+    result = engine.receive(1)  
+
+    if not result or len(result) < 1:
+        raise ValueError("Failed to get static evaluation from engine.")
+
+
+    return int(result[0])
+
+
+
+def load_training_data(evals_path, graphs_path, device, dumb_train=False, static_train=False):
     from evaluator import load_results
     evals = load_results(evals_path)
     with open(graphs_path, "rb") as f:
         graphs = pickle.load(f)
     graph_dict = {g["position"]: g for g in graphs}
     data_list = []
+
+    if static_train:
+        from arena import Engine
+        evals = tqdm(evals, desc="Loading static evaluations")
+        engine = Engine(NORMAL_MODEL_PATH)
+
     for eval in evals:
         position = eval["position"]
         graph = graph_dict.get(position)
@@ -127,6 +152,8 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False):
             edges = graph["graph"][2]
             if dumb_train:
                 evaluation = np.sum(features[:, 2] - features[:, 3])
+            elif static_train:
+                evaluation = eval['static_eval'] if 'static_eval' in eval.keys() else get_static_eval(eval, engine)
             else:
                 evaluation = eval["evaluation"]
             evaluation = np.clip(evaluation, -6000, 6000) / 6000.0
@@ -213,12 +240,12 @@ def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
 
 
 
-def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None, dumb_train=False,
+def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None, dumb_train=False, static_train=False,
             hidden_dim=64, num_gnn_layers=3, dropout=0.2, export_folder='./'):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    data_list = load_training_data(evals_path, graphs_path, device, dumb_train=dumb_train)
+    data_list = load_training_data(evals_path, graphs_path, device, dumb_train=dumb_train, static_train=static_train)
     train_data, val_data = train_test_split(data_list, test_size=0.2, random_state=42)
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
@@ -268,8 +295,12 @@ if __name__ == "__main__":
                         help='Use GAT layers instead of GCN.')
     parser.add_argument('--load_from_pth', type=str, default=None,
                         help='Path to a pre-trained model in .pth format.')
-    parser.add_argument('--dumb_train', action='store_true',
+    
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument('--dumb_train', action='store_true',
                         help='Train the model predicting the difference between the current player\'s piece count and the opponent\'s piece count.')
+    group.add_argument('--static_train', action='store_true',
+                        help='Train the model predicting the static evaluation.')
 
     parser.add_argument('--export_folder', type=str, default='./',
                         help='Folder to save the exported ONNX and pth model.')
@@ -286,6 +317,6 @@ if __name__ == "__main__":
 
 
     trainer(evals_path=args.evals_path, graphs_path=args.graphs_path, num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size, use_gat=args.use_gat, model_path=args.load_from_pth,
-            dumb_train=args.dumb_train, hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
+            dumb_train=args.dumb_train, static_train=args.static_train, hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
             export_folder=args.export_folder)
     print("Done!")

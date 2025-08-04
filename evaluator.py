@@ -41,10 +41,16 @@ def get_engine_eval(engine_path, positions, depth=5, timeout = 120):
                     pos["depth"] = depth
                     pos["position"] = position
                     pos["evaluation"] = int(result)
+
+                    engine.send('static_eval')
+                    result = engine.receive(timeout=1)
+                    if len(result) > 0 and (result[0].isdigit() or (result[0][0] == '-' and result[0][1:].isdigit())):
+                        pos["static_eval"] = int(result[0])
+
                     scores.append(pos)
                 else:
-                    print(position)
-                    print(result)
+                    raise ValueError(f"Unexpected result format: {result}")
+
         except Exception as e:
             print(position)
             print(e)
