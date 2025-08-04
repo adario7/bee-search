@@ -19,7 +19,7 @@ impl Board {
     pub fn static_eval(&mut self) -> Eval {
         #[cfg(feature = "gnn")]
         {
-            self.gnn_eval()
+            return self.gnn_eval();
         }
         let my_moves_n = self.generate_moves().len();
         self.static_eval_fast(my_moves_n)
@@ -28,7 +28,7 @@ impl Board {
     pub fn static_eval_fast(&mut self, my_moves_n: usize) -> Eval {
         #[cfg(feature = "gnn")]
         {
-            self.gnn_eval()
+            return self.gnn_eval();
         }
         let my_score = self.score(my_moves_n);
         self.turn_num += 1;
