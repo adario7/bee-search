@@ -12,7 +12,7 @@ regex = "1.11.1"
 rand = "0.9.0"
 indicatif = "0.17.11"
 clap = { version = "4.4", features = ["derive"] }
-ort = "1.16"
+ort = { version = "1.16", features = ["load-dynamic"] }
 ndarray = "0.15"
 crossbeam = "0.8.4"
 num_cpus = "1.17.0"
