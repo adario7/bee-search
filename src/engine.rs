@@ -1,5 +1,6 @@
 use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
-use std::{cmp::Ordering, time::{Duration, Instant}, u64, usize};
+use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc}, time::{Duration, Instant}, u64, usize};
+use crossbeam::thread;
 
 pub type Depth = u8;
 const INF: Eval = 32500;
@@ -11,16 +12,20 @@ fn mate_in(ply: Depth) -> Eval {
 
 pub struct Engine {
     tt: TTable,
-    nnodes: u64,
-    qsnodes: u64,
-    deadline: Instant,
-    // heremoves are indexed by color, (from or piece type), to; pass is last entry
-    // map move -> history score 
-    history_h: Vec<i64>,
-    // map move -> countermove producing a beta cutoff
-    countermove: Vec<Action>,
+    nnodes: AtomicU64,
+    qsnodes: AtomicU64,
     // LMR table
     reductions: Vec<f32>
+}
+
+pub struct ThreadData {
+    id: usize,
+    board: Board,
+    abort: Arc<AtomicBool>,
+    completed_depth: Arc<AtomicU8>,
+    deadline: Instant,
+    history_h: Vec<i64>,
+    countermove: Vec<Action>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,17 +40,17 @@ const KILLER_N: usize = 2;
 type KillerT = [(Action, u8); KILLER_N];
 
 struct PendingMove<'a> {
-    board: &'a mut Board,
+    td: &'a mut ThreadData,
 }
-impl Board {
+impl ThreadData {
     fn play_pending(&mut self, mv: Action) -> PendingMove {
-        self.do_action(mv);
-        PendingMove { board: self }
+        self.board.do_action(mv);
+        PendingMove { td: self }
     }
 }
 impl Drop for PendingMove<'_> {
     fn drop(&mut self) {
-        self.board.undo_action();
+        self.td.board.undo_action();
     }
 }
 
@@ -55,12 +60,9 @@ impl Engine {
             0.68 * (i as f32).ln()
         }).collect();
         Self {
-            nnodes: 0,
-            qsnodes: 0,
-            deadline: Instant::now(),
-            tt: TTable::new(1 << 28), // TODO: make this configurable
-            history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
-            countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+            nnodes: AtomicU64::new(0),
+            qsnodes: AtomicU64::new(0),
+            tt: TTable::new(1 << 26), // TODO: make this configurable
             reductions
         }
     }
@@ -107,14 +109,14 @@ impl Engine {
         soft
     }*/
 
-    fn order_moves(&self, moves: Vec<Action>, board: &mut Board, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
+    fn order_moves(&self, moves: Vec<Action>, td: &mut ThreadData, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
         let pv = pv.unwrap_or(Action::Pass);
-        let countermove = self.countermove[Self::last_move_index(board)];
+        let countermove = td.countermove[Self::last_move_index(&td.board)];
         let mut moves = moves.into_iter()
             .map(|mv| MoveInfo { mv,
-                quiet: board.is_quiet(&mv),
+                quiet: td.board.is_quiet(&mv),
                 killer: killers.iter().find(|(m, _)| *m == mv).map(|(_, i)| *i).unwrap_or(0),
-                hist: self.history_h[Self::hist_index(board.color(), mv)] })
+                hist: td.history_h[Self::hist_index(td.board.color(), mv)] })
             .collect::<Vec<_>>();
         moves.sort_by(|a, b| {
             // 1) PV
@@ -148,7 +150,7 @@ impl Engine {
         moves
     }
 
-    fn update_heuristics(&mut self, board: &Board, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
+    fn update_heuristics(&self, td: &mut ThreadData, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
         let mv = mvi.mv;
         if alpha >= beta && mvi.quiet && Some(mv) != pv {
             // remember killer move
@@ -160,42 +162,42 @@ impl Engine {
                 *cnt = 1;
             }
             // remember countermove
-            self.countermove[Self::last_move_index(board)] = mv;
+            td.countermove[Self::last_move_index(&td.board)] = mv;
             // add history bonus
             let bonus = (1 as i64) << depth;
-            self.history_h[Self::hist_index(board.color(), mv)] += bonus;
+            td.history_h[Self::hist_index(td.board.color(), mv)] += bonus;
             for prev in moves.iter() {
                 if prev.mv == mv {
                     break;
                 }
                 if prev.quiet {
-                    self.history_h[Self::hist_index(board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
+                    td.history_h[Self::hist_index(td.board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
                 }
             }
         }
     }
 
     // principal variation search with LMR
-    fn pvs(&mut self, board: &mut Board, ply: Depth, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, move_index: usize) -> Option<Value> {
+    fn pvs(&self, td: &mut ThreadData, ply: Depth, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, move_index: usize) -> Option<Value> {
         let nply = ply + 1;
         let ndepth = depth - 1;
         if move_index == 0 || depth < 2 {
             // search the first move with the full window
-            self.minimax(board, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
+            self.minimax(td, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
             let r = self.reductions[move_index] * self.reductions[depth as usize] + 1.05;
             let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).ceil() as Depth;
-            let mut score = -self.minimax(board, nply, d, -(alpha+1), -alpha, killers)?;
+            let mut score = -self.minimax(td, nply, d, -(alpha+1), -alpha, killers)?;
             // if the reduced null window search fails, search again with a full window
             if score > alpha && (beta > 1 + alpha || d < ndepth) {
-                score = -self.minimax(board, nply, ndepth, -beta, -alpha, killers)?;
+                score = -self.minimax(td, nply, ndepth, -beta, -alpha, killers)?;
             }
             Some(score)
         }
     }
 
-    fn eval_with_caches(&mut self, board: &mut Board, entry: Option<TEntry>, moves: &mut Option<Vec<Action>>) -> Eval {
+    fn eval_with_caches(&self, board: &mut Board, entry: Option<TEntry>, moves: &mut Option<Vec<Action>>) -> Eval {
         entry.and_then(|e| e.eval)
             .unwrap_or_else(|| {
                 let mv = board.generate_moves();
@@ -207,23 +209,23 @@ impl Engine {
             })
     }
 
-    fn qsearch(&mut self, board: &mut Board, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+    fn qsearch(&self, td: &mut ThreadData, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         const QS_DEPTH: Depth = 0; // qsearch is alwyas considered at depth 0, lower then any nomrmal search depth
 
         // out of time case
-        if Instant::now() > self.deadline {
+        if Instant::now() > td.deadline {
             return None;
         }
-        self.nnodes += 1;
-        self.qsnodes += 1;
+        self.nnodes.fetch_add(1, atomic::Ordering::Relaxed);
+        self.qsnodes.fetch_add(1, atomic::Ordering::Relaxed);
 
         // terminal poisiton case
-        let terminal_score = self.terminal_score(board, ply);
+        let terminal_score = self.terminal_score(&td.board, ply);
         if terminal_score.is_some() {
             return terminal_score;
         }
 
-        let entry = self.tt.get(board.zobrist_hash);
+        let entry = self.tt.get(td.board.zobrist_hash);
         let pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
             if entry.depth >= QS_DEPTH {
@@ -240,7 +242,7 @@ impl Engine {
             }
         }
         let mut moves: Option<Vec<Action>> = None;
-        let eval = self.eval_with_caches(board, entry, &mut moves);
+        let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
 
         // stand pat: return immediately if the static eval is good enough, to avoid searching all non-quiet moves
         let mut alpha = alpha0;
@@ -254,15 +256,15 @@ impl Engine {
             return Some(eval);
         }
 
-        let mut moves = moves.unwrap_or_else(|| board.generate_moves());
+        let mut moves = moves.unwrap_or_else(|| td.board.generate_moves());
         let mut child_klr = Default::default();
         let mut best_move: Option<(Value, MoveInfo)> = None;
-        moves.retain(|mv| board.is_noisy(mv)); // qsearch only considers noisy moves
-        let moves = self.order_moves(moves, board, pv, killers);
+        moves.retain(|mv| td.board.is_noisy(mv)); // qsearch only considers noisy moves
+        let moves = self.order_moves(moves, td, pv, killers);
         for mvi in moves.iter() {
             let mv = mvi.mv;
-            let pending = board.play_pending(mv);
-            let opt = self.qsearch(pending.board, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
+            let pending = td.play_pending(mv);
+            let opt = self.qsearch(pending.td, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
             drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
@@ -276,35 +278,35 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), ply, QS_DEPTH);
+            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), QS_DEPTH);
         }
 
         Some(alpha)
     }
 
 
-    fn minimax(&mut self, board: &mut Board, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
-        let initial_hash = board.zobrist_hash;
+    fn minimax(&self, td: &mut ThreadData, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+        let initial_hash = td.board.zobrist_hash;
         // out of time case
-        if Instant::now() > self.deadline {
+        if Instant::now() > td.deadline || td.abort.load(atomic::Ordering::Relaxed) {
             return None;
         }
-        self.nnodes += 1;
+        self.nnodes.fetch_add(1, atomic::Ordering::Relaxed);
 
         // depth cutoff case
         if depth == 0 {
-            return self.qsearch(board, ply, ply * 2, alpha0, beta, killers);
+            return self.qsearch(td, ply, ply * 2, alpha0, beta, killers);
         }
 
         // terminal poisiton case
-        let terminal_score = self.terminal_score(board, ply);
+        let terminal_score = self.terminal_score(&td.board, ply);
         if terminal_score.is_some() {
             debug_assert!(ply > 0);
             return terminal_score;
         }
 
         // tt lookup
-        let entry = self.tt.get(board.zobrist_hash);
+        let entry = self.tt.get(td.board.zobrist_hash);
         let pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
             if entry.depth >= depth {
@@ -326,12 +328,12 @@ impl Engine {
         // null move pruning
         const NMR: Depth = 2;
         if depth > NMR && ply > 0 {
-            let eval = self.eval_with_caches(board, entry, &mut moves);
+            let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
             if eval >= beta {
                 let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
-                let pending = board.play_pending(Action::Pass);
-                let value = -self.minimax(pending.board, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
+                let pending = td.play_pending(Action::Pass);
+                let value = -self.minimax(pending.td, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
                 drop(pending);
                 if value >= beta {
                     return Some(self.fail_high(value, beta));
@@ -339,16 +341,16 @@ impl Engine {
             }
         }
 
-        let moves = moves.unwrap_or_else(|| board.generate_moves());
-        let moves = self.order_moves(moves, board, pv, killers);
+        let moves = moves.unwrap_or_else(|| td.board.generate_moves());
+        let moves = self.order_moves(moves, td, pv, killers);
         let mut alpha = alpha0;
         let mut best_move: Option<(Value, MoveInfo)> = None;
         let mut child_klr = Default::default();
         let mut explored_quiet = 0;
         for (move_idx, mvi) in moves.iter().enumerate() {
             let mv = mvi.mv;
-            let pending = board.play_pending(mv);
-            let opt = self.pvs(pending.board, ply, depth, alpha, beta, &mut child_klr, move_idx);
+            let pending = td.play_pending(mv);
+            let opt = self.pvs(pending.td, ply, depth, alpha, beta, &mut child_klr, move_idx);
             drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
@@ -365,35 +367,36 @@ impl Engine {
 
         // update history heuristic
         if let Some((_, mvi)) = best_move {
-            self.update_heuristics(board, depth, alpha, beta, killers, pv, mvi, &moves, explored_quiet);
+            self.update_heuristics(td, depth, alpha, beta, killers, pv, mvi, &moves, explored_quiet);
         }
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(board.zobrist_hash, alpha0, beta, mvi.mv, value, None, ply, depth);
+            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, None, depth);
         }
 
-        debug_assert!(board.zobrist_hash == initial_hash);
+        debug_assert!(td.board.zobrist_hash == initial_hash);
         Some(alpha)
     }
 
-    fn aspiration_search(&mut self, board: &mut Board, depth: Depth) -> Option<Value> {
+    fn aspiration_search(&self, td: &mut ThreadData, depth: Depth) -> Option<Value> {
+        if td.abort.load(atomic::Ordering::Relaxed) { return None; }
         // guess the value of the search will be around the previous result
-        let guess = self.tt.get(board.zobrist_hash)
+        let guess = self.tt.get(td.board.zobrist_hash)
             .map(|e| e.value);
-        const W: i64 = 70;
-        let mut alpha = guess.map(|v| v as i64 - W).unwrap_or(-INF as i64);
-        let mut beta = guess.map(|v| v as i64 + W).unwrap_or(INF as i64);
+        let w: i64 = 70 + td.id as i64;
+        let mut alpha = guess.map(|v| v as i64 - w).unwrap_or(-INF as i64);
+        let mut beta = guess.map(|v| v as i64 + w).unwrap_or(INF as i64);
         let mut root_klr = Default::default();
         for i in 0.. {
-            let initial_hash = board.zobrist_hash;
-            let value = self.minimax(board, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
-            debug_assert!(board.zobrist_hash == initial_hash);
+            let initial_hash = td.board.zobrist_hash;
+            let value = self.minimax(td, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
+            debug_assert!(td.board.zobrist_hash == initial_hash);
             // when search fails, grow the window exponentially
             if value as i64 <= alpha {
-                alpha = (alpha - W * (1 << i)).min(value as i64 - 1).max(-INF as i64);
+                alpha = (alpha - w * (1 << i)).min(value as i64 - 1).max(-INF as i64);
             } else if value as i64 >= beta {
-                beta = (beta + W * (1 << i)).max(value as i64 + 1).min(INF as i64);
+                beta = (beta + w * (1 << i)).max(value as i64 + 1).min(INF as i64);
             } else {
                 return Some(value);
             }
@@ -401,43 +404,85 @@ impl Engine {
         panic!();
     }
 
-    fn iterative_deepening(&mut self, board: &mut Board, max_depth: Depth) -> (Value, Action) {
-        self.tt.clear_one(board.zobrist_hash); // make sure the root TT is available
-        let mut incumbent = (0, *board.generate_moves().first().unwrap_or(&Action::Pass));
-        let mut prev_nodes = self.nnodes;
+    fn iterative_deepening(&self, td: &mut ThreadData, max_depth: Depth) {
         for depth in 1..=max_depth {
             let start = Instant::now();
-            let score = self.aspiration_search(board, depth);
-            let option = self.tt.get(board.zobrist_hash);
-            let elapsed = start.elapsed();
+            let score = self.aspiration_search(td, depth);
+            let option = self.tt.get(td.board.zobrist_hash);
             if score.is_none() {
-                eprintln!("depth {}: ran out of time", depth);
                 break;
             }
-            let score = score.unwrap();
-            if let Some(entry) = option {
-                incumbent = (score, entry.pv);
-                eprintln!("depth {}: score={}, move={}, nodes={}, time={}ms", depth, score, board.action_to_string(incumbent.1), self.nnodes - prev_nodes, elapsed.as_millis());
-            } else {
-                eprintln!("depth {}: could not find matching tt entry", depth);
+
+            let mut prev = td.completed_depth.load(atomic::Ordering::Relaxed);
+            while depth > prev {
+                match td.completed_depth.compare_exchange(prev, depth, atomic::Ordering::SeqCst, atomic::Ordering::Relaxed) {
+                    Ok(_) => {
+                        if let Some(entry) = option {
+                            let score = score.unwrap();
+                            let elapsed = start.elapsed();
+                            let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
+                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, score, td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
+                        } else {
+                            eprintln!("[#{}] depth {}: could not find matching tt entry", td.id, depth);
+                        }
+                        break;
+                    }
+                    Err(actual) => prev = actual,
+                }
             }
-            debug_assert!(board.is_legal(incumbent.1));
-            prev_nodes = self.nnodes;
+
         }
-        incumbent
+        td.abort.store(true, atomic::Ordering::Relaxed);
     }
 
-    pub fn best_move(&mut self, board: &mut Board, max_depth: Depth, max_time: Duration) -> (Value, Action) {
+    fn lazy_smp(self: Arc<Self>, board: &Board, max_depth: Depth, deadline: Instant, num_threads: usize) -> (Value, Action) {
+        self.tt.clear_one(board.zobrist_hash); // make sure the root TT slot is available
+    
+        thread::scope(|scope| {
+            let abort = Arc::new(AtomicBool::new(false));
+            let compl = Arc::new(AtomicU8::new(0));
+            for i in 0..num_threads {
+                let th_engine = self.clone();
+                let th_abort = abort.clone();
+                let th_compl = compl.clone();
+                scope.spawn(move |_| {
+                    let mut td = ThreadData {
+                        id: i,
+                        board: board.clone(),
+                        abort: th_abort,
+                        completed_depth: th_compl,
+                        deadline,
+                        history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                        countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                    };
+                    th_engine.iterative_deepening(&mut td, max_depth);
+                });
+            }
+        })
+        .unwrap();
+
+        let option = self.tt.get(board.zobrist_hash);
+        if let Some(entry) = option {
+            if board.is_legal(entry.pv) {
+                return (entry.value, entry.pv);
+            }
+            eprintln!("root tt entry is not legal");
+        } else {
+            eprintln!("could not find matching tt entry");
+        }
+        (0, *board.generate_moves().first().unwrap_or(&Action::Pass))
+    }
+
+    pub fn best_move(self: Arc<Self>, board: &Board, max_depth: Depth, max_time: Duration, num_threads: usize) -> (Value, Action) {
         let start = Instant::now();
-        self.nnodes = 0;
-        self.qsnodes = 0;
-        self.tt.nwrite = 0;
-        self.tt.ncollisions = 0;
-        self.deadline = start + max_time;
-        let r = self.iterative_deepening(board, max_depth);
+        self.nnodes.store(0, atomic::Ordering::Relaxed);
+        self.qsnodes.store(0, atomic::Ordering::Relaxed);
+        let deadline = start + max_time;
+        let r = self.clone().lazy_smp(board, max_depth, deadline, num_threads);
         let elapsed = start.elapsed().as_secs_f64();
-        eprintln!("explored {} nodes in {:.2}s -> {:.3} knodes/s, in qsearch={:.1}%", self.nnodes, elapsed, self.nnodes as f64 / elapsed / 1000.0, 100.0 * self.qsnodes as f64 / self.nnodes as f64);
-        eprintln!("tt collisions: {}/{}, {:.2}%", self.tt.ncollisions, self.tt.nwrite, 100.0 * self.tt.ncollisions as f64 / self.tt.nwrite as f64);
+        let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
+        let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);
+        eprintln!("[{} th] explored {} nodes in {:.2}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
         r
     }
 
@@ -446,6 +491,6 @@ impl Engine {
     }
 
     pub fn last_nnodes(&self) -> u64 {
-        self.nnodes
+        self.nnodes.load(atomic::Ordering::Relaxed)
     }
 }

@@ -1,7 +1,8 @@
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::IndexedRandom;
-use rand::{rngs::StdRng, SeedableRng}; // Added for seeded RNG and random choice
+use rand::{rngs::StdRng, SeedableRng}; use std::sync::Arc;
+// Added for seeded RNG and random choice
 use std::time::{Duration, Instant};
 
 use bee_search::board::{Action, Board, GameResult}; //
@@ -9,7 +10,7 @@ use bee_search::engine::{Engine, Depth}; //
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+struct Args { // TODO: num threads
     /// Skip the first s moves
     #[arg(long, default_value_t = 10)]
     skip: u32,
@@ -22,10 +23,6 @@ struct Args {
     #[arg(short, long, default_value_t = 4)]
     d: Depth,
 
-    /// Clear transposition table at each move
-    #[arg(short, long, default_value_t = false)]
-    c: bool,
-
     /// Random seed for move selection
     #[arg(short, long, default_value_t = 0)] // Added seed argument
     s: u64,
@@ -34,16 +31,16 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let mut board = Board::new(); //
-    let mut engine = Engine::new(); //
+    let mut board = Board::new();
+    let engine = Arc::new(Engine::new());
     let mut total_think_time = Duration::new(0, 0);
     let mut total_nodes = 0;
     // Initialize seeded RNG for predictable random moves
     let mut rng = StdRng::seed_from_u64(args.s); // Uses the -s seed
 
     println!(
-        "Starting simulation: skip={}, n={}, d={}, c={}, seed={}",
-        args.skip, args.n, args.d, args.c, args.s
+        "Starting simulation: skip={}, n={}, d={}, seed={}",
+        args.skip, args.n, args.d, args.s
     );
 
     // Setup progress bar
@@ -61,18 +58,12 @@ fn main() {
         }
 
         if move_i >= args.skip {
-            if args.c {
-                // Assuming the TTable struct used by Engine has a clear method
-                engine.clear_tt();
-                 pb.println(" (TT Cleared)"); // Use pb.println to avoid messing up the bar
-            }
-
             // --- Compute best move (for timing) but don't use it ---
             let start_time = Instant::now();
             let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
             // This call is primarily for timing and exercising the engine/TT logic.
             // The engine's internal eprintln will still show computed best move info [cite: 117]
-            let _computed_best_action = engine.best_move(&mut board, args.d, max_time_per_move); 
+            let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1); 
             let think_time = start_time.elapsed();
             total_think_time += think_time;
             total_nodes += engine.last_nnodes();

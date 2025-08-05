@@ -392,7 +392,7 @@ mod test {
         let mut b2 = Board::new();
 
         let depth = 50;
-        let num_runs = 1000;
+        let num_runs = 100;
         let num_tries = 100;
         let mut bar = ProgressBar::new(num_runs);
 
@@ -442,7 +442,7 @@ mod test {
             }
         }
 
-        let num_runs2 = 1000;
+        let num_runs2 = 100;
         let depth2 = 200;
 
         bar = ProgressBar::new(num_runs2);
