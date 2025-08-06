@@ -140,9 +140,73 @@ def get_graph_from_positions(positions, engine):
         for i in range(n):
             edges[i] = np.array([int(x) for x in result[up_to + i].split(' ')])
 
-        graphs.append({"position": position, "graph": [nodes, features, edges]})
+        up_to += n
+        pieces_on_tile = []
+        for i in range(n):
+            height = int(result[up_to])
+            up_to += 1
+            if height == 0:
+                pieces_on_tile.append(None)
+                continue
+            
+            height -= 1
+            top_piece = [int(x) for x in result[up_to].split(' ')]
+            up_to += 1
+            pieces = [[int(x) for x in result[i].split(' ')] for i in range(up_to, up_to + height)]
+            pieces = [top_piece] + pieces[::-1]
+            pieces_on_tile.append(pieces)
+
+
+            up_to += height
+        graphs.append({"position": position, "graph": [nodes, features, edges], "pieces_on_tile": pieces_on_tile})
 
     return graphs
+
+
+def get_global_features_from_positions(positions, engine):
+
+    global_features = []
+
+    print("Generating global features...")
+
+    for position in tqdm(positions):
+        engine.send(f"newgame {position}")
+        result = engine.receive(timeout=1)
+        if len(result) == 0:
+            raise TimeoutError("Engine didn't respond")
+
+        engine.send("global_features")
+        result = engine.receive(timeout=1)
+        if len(result) == 0:
+            raise TimeoutError("Engine didn't respond")
+
+        features = {}
+
+        for line in result:
+            key, value = line.split(": ", 1)
+            match key:
+                case "queen_score":
+                    features["queen_score"] = int(value)
+                case "other_queen_score":
+                    features["other_queen_score"] = int(value)
+                case "n_moves":
+                    features["n_moves"] = int(value)
+                case "other_n_moves":
+                    features["other_n_moves"] = int(value)
+                case "tiles_placed":
+                    tiles_placed = [int(x) for x in value.split()]
+                    features["tiles_placed"] = tiles_placed
+                case "other_tiles_placed":
+                    other_tiles_placed = [int(x) for x in value.split()]
+                    features["other_tiles_placed"] = other_tiles_placed
+                case _:
+                    raise ValueError(f"Unknown feature: {key} with value {value}")
+
+        global_features.append(features)
+
+    return global_features
+
+
 
 def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluate):
     existing_evals = load_results(evals_path)
@@ -188,6 +252,10 @@ if __name__ == "__main__":
                         help='Path to save the evaluations JSON file.')
     parser.add_argument('--reevaluate', action='store_true',
                         help='Re-evaluate positions if depth or engine name are different from the one we are using now.')
+    parser.add_argument('--global-features-path', type=str, default=None,
+                        help='Path to save the global features JSON file.')
+    parser.add_argument('--graphs-path', type=str, default=None,
+                        help='Path to save the graphs pickle file.')
 
     args = parser.parse_args()
 
@@ -214,6 +282,13 @@ if __name__ == "__main__":
         json.dump(list(evals_map.values()), f, indent=1)
     print(f"Evaluations saved to {args.evals_path}")
 
-    graphs = get_graph_from_positions(positions=positions, engine=engine)
-    with open("logs/graphs.pkl", "wb") as f:
-        pickle.dump(graphs, f)
+    if args.global_features_path:
+        global_features = get_global_features_from_positions(positions=positions, engine=engine)
+        with open(args.global_features_path, "w") as f:
+            json.dump(global_features, f, indent=1)
+
+    if args.graphs_path:
+        graphs = get_graph_from_positions(positions=positions, engine=engine)
+        with open(args.graphs_path, "wb") as f:
+            pickle.dump(graphs, f)
+            

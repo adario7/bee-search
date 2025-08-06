@@ -1,9 +1,10 @@
 use std::io::stdin;
 use std::time::Duration;
 
-use crate::board::Board;
+use crate::board::{Board, TOT_QTY};
 use crate::engine::{Depth, Engine};
 use crate::perft;
+use crate::piece::Piece;
 
 pub struct Uhp {
     board: Board,
@@ -177,6 +178,41 @@ impl Uhp {
             }
             println!()
         }
+
+        // Additional features
+
+        for node in &graph.nodes {
+            println!("{} ", self.board.height(*node));
+            if self.board.tile(*node) == Piece::empty() {
+                continue;
+            }
+
+            println!("{} {} ",self.board.tile(*node).color().index() ^ self.board.color().index(), self.board.tile(*node).ptype().index());
+
+            if let Some(underworld) = self.board.underworld.get(node) {
+                for piece in underworld {
+                    println!("{} {} ", piece.color().index() ^ self.board.color().index(), piece.ptype().index());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn global_features(&mut self) -> UhpResult<()> {
+        println!("queen_score: {}", self.board.queen_score());
+        println!("other_queen_score: {}", self.board.other_queen_score());
+        println!("n_moves: {}", self.board.n_moves());
+        println!("other_n_moves: {}", self.board.other_n_moves());
+        print!("tiles_placed: ");
+        for i in 0..8 {
+            print!("{} ", TOT_QTY[i] - self.board.placeable[self.board.color().index()][i]);
+        }
+        println!();
+        print!("other_tiles_placed: ");
+        for i in 0..8 {
+            print!("{} ", TOT_QTY[i] - self.board.placeable[self.board.color().other().index()][i]);
+        }
+        println!();
         Ok(())
     }
 
@@ -205,6 +241,7 @@ impl Uhp {
             "perft" => self.perft(args),
             "eval" => self.eval(args),
             "graph" => self.print_graph(),
+            "global_features" => self.global_features(),
             "static_eval" => self.static_eval(),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };

@@ -4,8 +4,16 @@ pub type Eval = i16;
 pub type Value = Eval;
 
 impl Board {
-    fn queen_score(&self) -> Eval {
+    pub fn queen_score(&self) -> Eval {
         let color = self.color();
+        match self.queens[color.index()] {
+            Some(tile) => adjacent(tile).iter().filter(|&&t| self.tile(t).is_none()).count() as Eval,
+            None => 5
+        }
+    }
+
+    pub fn other_queen_score(&self) -> Eval {
+        let color = self.color().other();
         match self.queens[color.index()] {
             Some(tile) => adjacent(tile).iter().filter(|&&t| self.tile(t).is_none()).count() as Eval,
             None => 5
@@ -16,6 +24,17 @@ impl Board {
         1000 * self.queen_score() + my_moves_n as Eval
     }
 
+    pub fn n_moves(&self) -> usize {
+        self.generate_moves().len()
+    }
+
+    pub fn other_n_moves(&mut self) -> usize {
+        self.turn_num += 1;
+        let n_moves = self.generate_moves().len();
+        self.turn_num -= 1;
+        n_moves
+    }
+    
     pub fn static_eval(&mut self) -> Eval {
         #[cfg(feature = "gnn")]
         {

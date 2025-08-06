@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
-static GNN_PATH: &str = "models/hive_gnn.onnx";
+static GNN_PATH: &str = "logs/static_training/hive_gnn.onnx";
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -58,7 +58,7 @@ pub struct Board {
     pub gnn: std::sync::Arc<GnnEvaluator>,
 }
 
-const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
+pub const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
 
 impl Board {
     pub fn new() -> Self {
