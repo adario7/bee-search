@@ -62,7 +62,7 @@ impl Engine {
         Self {
             nnodes: AtomicU64::new(0),
             qsnodes: AtomicU64::new(0),
-            tt: TTable::new(1 << 26), // TODO: make this configurable
+            tt: TTable::new(1 << 28), // TODO: make this configurable
             reductions
         }
     }
@@ -135,15 +135,15 @@ impl Engine {
             if a.killer != b.killer {
                 return b.killer.cmp(&a.killer);
             }
-            // 4) countermove
+            // 4) history heuristic
+            if a.hist != b.hist {
+                return b.hist.cmp(&a.hist);
+            }
+            // 5) countermove
             if a.mv == countermove {
                 return Ordering::Less;
             } else if b.mv == countermove {
                 return Ordering::Greater;
-            }
-            // 5) history heuristic
-            if a.hist != b.hist {
-                return b.hist.cmp(&a.hist);
             }
             return Ordering::Equal;
         });
