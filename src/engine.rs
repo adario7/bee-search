@@ -307,7 +307,7 @@ impl Engine {
 
         // tt lookup
         let entry = self.tt.get(td.board.zobrist_hash);
-        let pv = entry.map(|e| e.pv); // use the PV even if below depth
+        let mut pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
             if entry.depth >= depth {
                 // improve out bound
@@ -321,6 +321,14 @@ impl Engine {
                     return Some(entry.value);
                 }
             }
+        }
+
+        // internal iterative deepening
+        if depth >= 4 && pv.is_none() {
+            const IIDR: Depth = 2;
+            let r = IIDR + (depth - IIDR) / 3;
+            self.minimax(td, ply, depth - r, alpha0, beta, killers);
+            pv = self.tt.get(td.board.zobrist_hash).map(|e| e.pv);
         }
 
         let mut moves: Option<Vec<Action>> = None;
