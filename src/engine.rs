@@ -10,12 +10,16 @@ fn mate_in(ply: Depth) -> Eval {
     WIN + 99 - ply as Eval
 }
 
+fn mated_in(ply: Depth) -> Eval {
+    -mate_in(ply)
+}
+
 pub struct Engine {
     tt: TTable,
     nnodes: AtomicU64,
     qsnodes: AtomicU64,
     // LMR table
-    reductions: Vec<f32>
+    reductions: Vec<f32>,
 }
 
 pub struct ThreadData {
@@ -285,7 +289,7 @@ impl Engine {
     }
 
 
-    fn minimax(&self, td: &mut ThreadData, ply: Depth, depth: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+    fn minimax(&self, td: &mut ThreadData, ply: Depth, depth: Depth, mut alpha: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         let initial_hash = td.board.zobrist_hash;
         // out of time case
         if Instant::now() > td.deadline || td.abort.load(atomic::Ordering::Relaxed) {
@@ -295,7 +299,16 @@ impl Engine {
 
         // depth cutoff case
         if depth == 0 {
-            return self.qsearch(td, ply, ply * 2, alpha0, beta, killers);
+            return self.qsearch(td, ply, ply * 2, alpha, beta, killers);
+        }
+
+        // move count pruning
+        if ply != 0 {
+            alpha = alpha.max(mated_in(ply));
+            beta = beta.min(mate_in(ply + 1));
+            if alpha >= beta {
+                return Some(self.fail_high(alpha, beta));
+            }
         }
 
         // terminal poisiton case
@@ -306,18 +319,21 @@ impl Engine {
         }
 
         // tt lookup
-        let entry = self.tt.get(td.board.zobrist_hash);
+        let mut entry = self.tt.get(td.board.zobrist_hash);
         let mut pv = entry.map(|e| e.pv); // use the PV even if below depth
         if let Some(entry) = entry {
             if entry.depth >= depth {
-                // improve out bound
+                // improve our bound
                 if entry.flag == TTFlag::LowerBound {
-                    alpha0 = alpha0.max(entry.value);
+                    alpha = alpha.max(entry.value);
                 } else if entry.flag == TTFlag::UpperBound {
                     beta = beta.min(entry.value);
                 }
                 // return the exact value if this is not the root
-                if ply != 0 && (entry.flag == TTFlag::Exact || alpha0 >= beta) {
+                if ply != 0 && alpha >= beta {
+                    return Some(self.fail_high(alpha, beta));
+                }
+                if ply != 0 && entry.flag == TTFlag::Exact {
                     return Some(entry.value);
                 }
             }
@@ -327,16 +343,29 @@ impl Engine {
         if depth >= 4 && pv.is_none() {
             const IIDR: Depth = 2;
             let r = IIDR + (depth - IIDR) / 3;
-            self.minimax(td, ply, depth - r, alpha0, beta, killers);
-            pv = self.tt.get(td.board.zobrist_hash).map(|e| e.pv);
+            self.minimax(td, ply, depth - r, alpha, beta, killers);
+            entry = self.tt.get(td.board.zobrist_hash);
+            pv = entry.map(|e| e.pv);
         }
 
+        // static eval
         let mut moves: Option<Vec<Action>> = None;
+        let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
+
+        // razoring
+        let is_pv = beta > alpha + 1; // TODO: this is not completely correct
+        if !is_pv && depth <= 6 && eval < alpha - 500 - 200 * depth as Eval * depth as Eval {
+            return self.qsearch(td, ply, ply * 2, alpha, beta, killers)
+        }
+
+        // futility pruning
+        if depth <= 4 && eval > beta + 150 + 120 * depth as Eval && eval.abs() < 6000 {
+            return Some(self.fail_high(eval, beta));
+        }
 
         // null move pruning
         const NMR: Depth = 2;
         if depth > NMR && ply > 0 {
-            let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
             if eval >= beta {
                 let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
@@ -349,9 +378,9 @@ impl Engine {
             }
         }
 
+        let alpha0 = alpha; // alpha0 is the alpha before searching moves
         let moves = moves.unwrap_or_else(|| td.board.generate_moves());
         let moves = self.order_moves(moves, td, pv, killers);
-        let mut alpha = alpha0;
         let mut best_move: Option<(Value, MoveInfo)> = None;
         let mut child_klr = Default::default();
         let mut explored_quiet = 0;
@@ -392,11 +421,11 @@ impl Engine {
         // guess the value of the search will be around the previous result
         let guess = self.tt.get(td.board.zobrist_hash)
             .map(|e| e.value);
-        let w: i64 = 70 + td.id as i64;
+        let w: i64 = 30 + td.id as i64;
         let mut alpha = guess.map(|v| v as i64 - w).unwrap_or(-INF as i64);
         let mut beta = guess.map(|v| v as i64 + w).unwrap_or(INF as i64);
         let mut root_klr = Default::default();
-        for i in 0.. {
+        for i in 0..99 {
             let initial_hash = td.board.zobrist_hash;
             let value = self.minimax(td, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
             debug_assert!(td.board.zobrist_hash == initial_hash);
@@ -409,7 +438,9 @@ impl Engine {
                 return Some(value);
             }
         }
-        panic!();
+        eprintln!("!!! [th={}] aspiration search failed", td.id);
+        debug_assert!(false);
+        Some(0)
     }
 
     fn iterative_deepening(&self, td: &mut ThreadData, max_depth: Depth) {

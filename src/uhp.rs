@@ -98,7 +98,7 @@ impl Uhp {
             (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
             let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
-            (99, time)
+            (30, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
