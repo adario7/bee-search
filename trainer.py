@@ -15,92 +15,74 @@ NORMAL_MODEL_PATH = "build/engines/normal/bee-search"
 FEATURES_LEN = 12
 
 class HiveGNN(nn.Module):
-    def __init__(self, input_dim=12, hidden_dim=64, num_gnn_layers=3, dropout=0.2, use_gat=True):
-        super(HiveGNN, self).__init__()
-        
+    def __init__(self, input_dim=12, hidden_dim=64, num_gnn_layers=3, dropout=0.2, use_gat=True, heads=2):
+        super().__init__()
         self.use_gat = use_gat
-        
-        self.gnn_layers = nn.ModuleList()
-        
-        if use_gat:
-            self.gnn_layers.append(GATConv(input_dim, hidden_dim, heads=4, dropout=dropout, concat=True))
-            current_dim = hidden_dim * 4
-            for _ in range(num_gnn_layers - 2):
-                self.gnn_layers.append(GATConv(current_dim, hidden_dim, heads=4, dropout=dropout, concat=True))
-            self.gnn_layers.append(GATConv(current_dim, hidden_dim, heads=1, dropout=dropout, concat=False))
-        else:
-            self.gnn_layers.append(GCNConv(input_dim, hidden_dim))
-            for _ in range(num_gnn_layers - 1):
-                self.gnn_layers.append(GCNConv(hidden_dim, hidden_dim))
-        
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-        self.mlp_head = nn.Sequential(
-            nn.Linear(2 * hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 32),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(32, 1)
-        )
-        
-    def forward(self, x, edge_index, batch=None):
-        for i, layer in enumerate(self.gnn_layers):
-            x = layer(x, edge_index)
-            if i < len(self.gnn_layers) - 1:
-                x = F.relu(x)
-            x = self.dropout(x)
-        x = self.layer_norm(x)
-        if batch is None:
-            mean_pool = torch.mean(x, dim=0, keepdim=True)
-            max_pool = torch.max(x, dim=0, keepdim=True)[0]
-        else:
-            mean_pool = global_mean_pool(x, batch)
-            max_pool = global_max_pool(x, batch)
-        global_repr = torch.cat([mean_pool, max_pool], dim=-1)
-        evaluation = self.mlp_head(global_repr)
-        return torch.tanh(evaluation)
 
-class HiveGCN(nn.Module):
-    def __init__(self, input_dim=12, hidden_dim=64, num_gnn_layers=3, dropout=0.2):
-        super(HiveGCN, self).__init__()
-        
         self.gnn_layers = nn.ModuleList()
-        self.gnn_layers.append(GCNConv(input_dim, hidden_dim))
-        for _ in range(num_gnn_layers - 1):
-            self.gnn_layers.append(GCNConv(hidden_dim, hidden_dim))
-        
-        self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
+        self.projections = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        in_dim = input_dim
+        for i in range(num_gnn_layers):
+            # determine out dimension for this layer
+            if use_gat:
+                # internal layers (except possibly last) may use concat heads
+                if i == num_gnn_layers - 1:
+                    # last GAT layer: single head, concat=False -> out dim = hidden_dim
+                    self.gnn_layers.append(GATConv(in_dim, hidden_dim, heads=1, concat=False, dropout=dropout))
+                    out_dim = hidden_dim
+                else:
+                    self.gnn_layers.append(GATConv(in_dim, hidden_dim, heads=heads, concat=True, dropout=dropout))
+                    out_dim = hidden_dim * heads
+            else:
+                self.gnn_layers.append(GCNConv(in_dim, hidden_dim))
+                out_dim = hidden_dim
+
+            # projection to match residual dimension: maps previous feature dim -> out_dim
+            self.projections.append(nn.Linear(in_dim, out_dim))
+            # per-layer LayerNorm with correct normalized shape
+            self.norms.append(nn.LayerNorm(out_dim))
+
+            # next layer's input dim equals this layer's output dim
+            in_dim = out_dim
+
+        # head: take mean+max pooled global repr (2 * last out_dim/2 => we keep hidden_dim as internal)
+        inter_dim = hidden_dim * 8
         self.mlp_head = nn.Sequential(
-            nn.Linear(2 * hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Linear(2 * in_dim, inter_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(inter_dim, hidden_dim),
+            nn.LeakyReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 32),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1)
         )
-        
+
     def forward(self, x, edge_index, batch=None):
         for i, layer in enumerate(self.gnn_layers):
-            x = layer(x, edge_index)
-            if i < len(self.gnn_layers) - 1:
-                x = F.relu(x)
-            x = self.dropout(x)
-        x = self.layer_norm(x)
+            out = layer(x, edge_index)
+            out = F.leaky_relu(out)
+            out = self.dropout(out)
+            out = self.norms[i](out)
+            res = self.projections[i](x)
+            x = res + out
+
         if batch is None:
             mean_pool = torch.mean(x, dim=0, keepdim=True)
             max_pool = torch.max(x, dim=0, keepdim=True)[0]
         else:
             mean_pool = global_mean_pool(x, batch)
             max_pool = global_max_pool(x, batch)
+
         global_repr = torch.cat([mean_pool, max_pool], dim=-1)
         evaluation = self.mlp_head(global_repr)
-        return torch.tanh(evaluation)
+        return torch.tanh(evaluation) * 1.5
+
 
 def create_node_features(board_state, device):
     return torch.tensor(board_state, dtype=torch.float32, device=device)
@@ -133,9 +115,11 @@ def get_static_eval(eval, engine):
 def load_training_data(evals_path, graphs_path, device, dumb_train=False, static_train=False):
     from evaluator import load_results
     evals = load_results(evals_path)
+    print(f"Loaded {len(evals)} evaluations.")
     with open(graphs_path, "rb") as f:
         graphs = pickle.load(f)
     graph_dict = {g["position"]: g for g in graphs}
+    print(f"Loaded {len(graph_dict)} graphs.")
     data_list = []
 
     if static_train:
@@ -143,7 +127,7 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False, static
         evals = tqdm(evals, desc="Loading static evaluations")
         engine = Engine(NORMAL_MODEL_PATH)
 
-    for eval in evals:
+    for eval in evals[:]:
         position = eval["position"]
         graph = graph_dict.get(position)
         if graph:
@@ -162,6 +146,7 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False, static
                 edge_index=create_adjacency_matrix(edges, device),
                 y=torch.tensor([evaluation], dtype=torch.float32, device=device)
             ))
+    print(f"Loaded {len(data_list)} samples")
     return data_list
 
 def load_from_pth(model, model_path, device='cuda'):
@@ -171,7 +156,6 @@ def load_from_pth(model, model_path, device='cuda'):
     return model
 
 def train_model(model, train_loader, val_loader, num_epochs=100, lr=0.001, device='cuda', export_folder='./'):
-
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
     criterion = nn.MSELoss()
@@ -249,18 +233,16 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
     train_data, val_data = train_test_split(data_list, test_size=0.2, random_state=42)
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
-    if use_gat:
-        model = HiveGNN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout, use_gat=True)
-        print("Using GAT model (requires ONNX opset 16+)")
-        if model_path:
-            model = load_from_pth(model, model_path, device=device)
-            print(f"Loaded model from {model_path}")
-    else:
-        model = HiveGCN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout)
-        print("Using GCN model (compatible with ONNX opset 11)")
-        if model_path:
-            model = load_from_pth(model, model_path, device=device)
-            print(f"Loaded model from {model_path}")
+    model = HiveGNN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout, use_gat=use_gat)
+    print("Using GAT model (requires ONNX opset 16+)")
+    if model_path:
+        model = load_from_pth(model, model_path, device=device)
+        print(f"Loaded model from {model_path}")
+
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total:,} | Trainable: {trainable:,} | Non-trainable: {total-trainable:,}")
+
     print("Starting training...")
     train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=num_epochs, lr=lr, device=device, export_folder=export_folder)
     model.load_state_dict(torch.load(os.path.join(export_folder, 'best_hive_gnn.pth')))
@@ -281,32 +263,32 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Train a GNN model for Hive evaluation.")
-    parser.add_argument('--evals_path', type=str, default='logs/evaluations.json',
+    parser.add_argument('--evals-path', type=str, default='logs/evaluations.json',
                         help='Path to the evaluations JSON file.')
-    parser.add_argument('--graphs_path', type=str, default='logs/graphs.pkl',
+    parser.add_argument('--graphs-path', type=str, default='logs/graphs.pkl',
                         help='Path to the graphs pickle file.')
-    parser.add_argument('--num_epochs', type=int, default=100,
+    parser.add_argument('--num-epochs', type=int, default=100,
                         help='Number of training epochs.')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate for training.')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch-size', type=int, default=64,
                         help='Batch size for training.')
-    parser.add_argument('--use_gat', action='store_true',
+    parser.add_argument('--use-gat', action='store_true',
                         help='Use GAT layers instead of GCN.')
-    parser.add_argument('--load_from_pth', type=str, default=None,
+    parser.add_argument('--load-from-pth', type=str, default=None,
                         help='Path to a pre-trained model in .pth format.')
     
     group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument('--dumb_train', action='store_true',
+    group.add_argument('--dumb-train', action='store_true',
                         help='Train the model predicting the difference between the current player\'s piece count and the opponent\'s piece count.')
-    group.add_argument('--static_train', action='store_true',
+    group.add_argument('--static-train', action='store_true',
                         help='Train the model predicting the static evaluation.')
 
-    parser.add_argument('--export_folder', type=str, default='./',
+    parser.add_argument('--export-folder', type=str, default='./',
                         help='Folder to save the exported ONNX and pth model.')
-    parser.add_argument('--hidden_dim', type=int, default=64,
+    parser.add_argument('--hidden-dim', type=int, default=64,
                         help='Hidden dimension for the GNN model.')
-    parser.add_argument('--num_gnn_layers', type=int, default=3,
+    parser.add_argument('--num-gnn-layers', type=int, default=3,
                         help='Number of GNN layers in the model.')
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout rate for the GNN model.')
