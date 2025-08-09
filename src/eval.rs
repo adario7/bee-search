@@ -21,7 +21,7 @@ impl Board {
     }
 
     fn score(&self, my_moves_n: usize) -> Eval {
-        100 * self.queen_score() + my_moves_n as Eval
+        1000 * self.queen_score() + my_moves_n as Eval
     }
 
     pub fn n_moves(&self) -> usize {
