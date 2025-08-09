@@ -1,4 +1,5 @@
 use std::io::stdin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::board::{Board, TOT_QTY};
@@ -8,7 +9,8 @@ use crate::piece::Piece;
 
 pub struct Uhp {
     board: Board,
-    engine: Engine
+    engine: Arc<Engine>,
+    num_threads: usize,
 }
 
 #[derive(Debug)]
@@ -35,9 +37,11 @@ pub type UhpResult<T> = std::result::Result<T, UhpError>;
 
 impl Uhp {
     pub fn new() -> Uhp {
+        let n = num_cpus::get();
         Uhp {
             board: Board::new(),
-            engine: Engine::new()
+            engine: Arc::new(Engine::new()),
+            num_threads: n
         }
     }
 
@@ -95,11 +99,11 @@ impl Uhp {
             (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
             let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
-            (99, time)
+            (30, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let (_, m) = self.engine.best_move(&mut self.board, depth, time);
+        let (_, m) = self.engine.clone().best_move(&self.board, depth, time, self.num_threads);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -121,14 +125,26 @@ impl Uhp {
     }
 
     fn print_options(&mut self) {
-        // TODO: print options
+        println!("NumThreads;int;{};32;1;32", self.num_threads);
     }
 
     fn get_option(&mut self, option: &str) -> UhpResult<()> {
+        if option == "NumThreads" {
+            println!("{}", self.num_threads);
+            return Ok(());
+        }
         Err(UhpError::InvalidOption(option.into()))
     }
 
-    fn set_option(&mut self, option: &str, _value: &str) -> UhpResult<()> {
+    fn set_option(&mut self, option: &str, value: &str) -> UhpResult<()> {
+        if option == "NumThreads" {
+            let value = value.parse::<usize>().map_err(|_| UhpError::SyntaxError(value.into()))?;
+            if value > 0 && value <= 32 {
+                self.num_threads = value;
+                self.print_options();
+                return Ok(());
+            }
+        }
         Err(UhpError::InvalidOption(option.into()))
     }
 
@@ -153,8 +169,12 @@ impl Uhp {
     }
 
     fn eval(&mut self, args: &str) -> UhpResult<()> {
-        let depth = args.parse::<u8>().unwrap_or(5);
-        let (score, _) = self.engine.best_move(&mut self.board, depth, Duration::from_secs(99999));
+        let depth = args.parse::<u8>().unwrap_or(0);
+        let score = if depth == 0 {
+            self.board.static_eval()
+        } else {
+            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads).0
+        };
         println!("{}", score);
         Ok(())
     }

@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import argparse
+import random
 import numpy as np
 progress_bar = True
 try:
@@ -231,7 +232,10 @@ class HiveArena:
         
         # Select two different engines
         selected_indices = np.random.choice(len(self.engine_paths), size=2, replace=False, p=weights)
-        return self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
+        a, b = self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
+        if random.random() < 0.5: # avoid a new engine with high weight always being white/black
+            a, b = b, a
+        return a, b
 
     def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves):
         position = self.starting_position

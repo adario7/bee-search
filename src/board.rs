@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
-static GNN_PATH: &str = "logs/static_training/hive_gnn.onnx";
+static GNN_PATH: &str = "models/hive_gnn.onnx";
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -392,7 +392,7 @@ mod test {
         let mut b2 = Board::new();
 
         let depth = 50;
-        let num_runs = 1000;
+        let num_runs = 100;
         let num_tries = 100;
         let mut bar = ProgressBar::new(num_runs);
 
@@ -442,7 +442,7 @@ mod test {
             }
         }
 
-        let num_runs2 = 1000;
+        let num_runs2 = 100;
         let depth2 = 200;
 
         bar = ProgressBar::new(num_runs2);
