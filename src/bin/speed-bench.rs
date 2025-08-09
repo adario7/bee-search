@@ -29,6 +29,9 @@ struct Args {
     /// Random seed for move selection
     #[arg(short, long, default_value_t = 0)] // Added seed argument
     s: u64,
+
+    #[arg(long, default_value_t=false)]
+    movegen_test: bool,
 }
 
 fn main() {
@@ -52,6 +55,42 @@ fn main() {
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
         .expect("Failed to create progress bar style")
         .progress_chars("#>-"));
+
+    if args.movegen_test {
+        for _game in 0..args.n {
+            board = Board::new();
+
+            for _move_i in 0..200 {
+                let game_status = board.game_result();
+                if game_status != GameResult::InProgress {
+                    break;
+                }
+
+                let start_t = Instant::now();
+                for _ in 0..1000 {
+                    total_nodes += board.generate_moves_n() as u64;
+                }
+                total_think_time += Instant::now() - start_t;
+
+                let mut legal_moves = board.generate_moves(); 
+                legal_moves.sort(); // Sort moves for consistent ordering
+
+                let chosen_action = if legal_moves.is_empty() {
+                    //pb.println("No legal moves available, playing Pass.");
+                    Action::Pass // Play pass if no moves available
+                } else {
+                    // Select a random move using the seeded RNG
+                    *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
+                };
+                // Apply the *randomly selected* move
+                board.do_action(chosen_action); 
+            }
+            pb.inc(1);
+        }
+        pb.finish_with_message("Simulation complete with total think time ");
+        println!("Total think time {:.3}", total_think_time.as_secs_f64());
+        return;
+    }
 
     for move_i in 0..(args.skip + args.n) {
         let game_status = board.game_result(); //

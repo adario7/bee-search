@@ -351,6 +351,8 @@ class HiveArena:
                 new_engine_paths = []
                 with open(engine_paths_file) as f:
                     for path in f:
+                        if path.startswith('#'):
+                            continue
                         new_engine_paths.append(path.replace('\n','').replace('\\','/'))
                 
                 # Check if engine list changed
@@ -445,7 +447,7 @@ if __name__ == '__main__':
     parser.add_argument("--engine_paths", type=str, default="logs/paths.txt", help="File containing paths to the engine executables")
     parser.add_argument("--n_matches", type=int, default=1, help="Number of matches")
     parser.add_argument("--update-elo", type=bool, default=True, help="If the elo gets updated")
-    parser.add_argument("--verbose", type=bool, default=False, help="Display info about matches in real time")
+    parser.add_argument("--verbose", action="store_true", help="Display info about matches in real time")
     parser.add_argument("--results-folder", type=str, default="logs/", help="Folder where the matches are stored")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
     parser.add_argument("--random-moves", type=int, default=0, help="Number of initial random moves")

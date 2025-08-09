@@ -1,6 +1,6 @@
-use std::cmp::{min, max};
-
+use std::cmp::{max};
 use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
+
 
 impl Board {
     fn generate_placements(&self, turns: &mut Vec<Action>) {
@@ -34,10 +34,43 @@ impl Board {
         }
     }
 
+    fn generate_placements_n(self: &Board) -> usize {
+        let mut no_placement = TileSet::new();
+        for &enemy in self.occupied_tiles[self.color().other().index()].iter() {
+            for adj in adjacent(enemy) {
+                no_placement.set(adj);
+            }
+        }
+
+        let mut num = 0;
+        for &friend in self.occupied_tiles[self.color() as usize].iter() {
+            for hex in adjacent(friend) {
+                if no_placement.get(hex) {
+                    continue;
+                }
+                no_placement.set(hex);
+                if self.occupied(hex) {
+                    continue;
+                }
+                let remaining = self.placeable[self.color().index()];
+                for bug in Pct::iter_all() {
+                    let num_left = remaining[bug as usize];
+                    if self.queen_required() && bug != Pct::Queen {
+                        continue;
+                    }
+                    if num_left > 0 {
+                        num += 1;
+                    }
+                }
+            }
+        }
+        num
+    }
+
     // Linear algorithm to find all cut vertexes.
     // Algorithm explanation: https://web.archive.org/web/20180830110222/https://www.eecs.wsu.edu/~holder/courses/CptS223/spr08/slides/graphapps.pdf
     // Example code: https://cp-algorithms.com/graph/cutpoints.html
-    pub(crate) fn find_cut_vertexes(&self) -> TileSet {
+    /*pub(crate) fn find_cut_vertexes(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             visited: TileSet,
@@ -90,6 +123,61 @@ impl Board {
         let start = *self.occupied_tiles[self.color().index()].first().unwrap_or_else(
             || self.occupied_tiles[self.color().index()].first().unwrap_or(&TILE_ZERO));
         dfs(&mut state, start, start);
+        state.immovable
+    }*/
+
+    pub(crate) fn find_cut_vertexes(&self) -> TileSet {
+        struct State<'a> {
+            board: &'a Board,
+            immovable: TileSet,
+            height: [u8; GRID_SIZE], 
+        }
+        let mut state = State {
+            board: self,
+            immovable: TileSet::new(),
+            height: [250; GRID_SIZE],
+        };
+        fn dfs(state: &mut State, hex: Tile, h: u8) -> u8 {
+            state.height[hex as usize] = h;
+
+            let mut minh = h;
+            for adj in adjacent(hex) {
+                if !state.board.occupied(adj) {
+                    continue;
+                }
+                if state.height[adj as usize] < 250 {
+                    if state.height[adj as usize] < minh {
+                        minh = state.height[adj as usize];
+                    }
+                } else {
+                    let res = dfs(state, adj, h+1);
+                    if res < minh {
+                        minh = res;
+                    }
+                    if res >= h {
+                        state.immovable.set(hex);
+                    }
+                }
+            }
+            minh
+        }
+
+        let start = *self.occupied_tiles[self.color().index()].first().unwrap_or_else(
+            || self.occupied_tiles[self.color().index()].first().unwrap_or(&TILE_ZERO));
+        
+        let mut num_cildren = 0;
+        state.height[start as usize] = 1;
+        for adj in adjacent(start) {
+            if !state.board.occupied(adj) || state.height[adj as usize] != 250 {
+                continue;
+            }
+            dfs(&mut state, adj, 2);
+            num_cildren += 1;
+        }
+        if num_cildren > 1 {
+            state.immovable.set(start);
+        }
+
         state.immovable
     }
 
@@ -167,6 +255,11 @@ impl Board {
         }
     }
 
+    fn generate_stack_walking_n(&self, hex: Tile) -> usize {
+        let mut buf = [0; 6];
+        self.slidable_adjacent_beetle(&mut buf, hex, hex).count()
+    }
+
     // Jumping over contiguous linear lines of tiles.
     fn generate_jumps(&self, hex: Tile, turns: &mut Vec<Action>) {
         for dir in Direction::all() {
@@ -185,6 +278,27 @@ impl Board {
                 turns.push(Action::Move(hex, jump));
             }
         }
+    }
+
+    fn generate_jumps_n(&self, hex: Tile) -> usize {
+        let mut n = 0;
+        for dir in Direction::all() {
+            let mut jump = hex + *dir;
+            let mut dist = 1;
+            while self.occupied(jump) {
+                jump = jump + *dir;
+                dist += 1;
+                if jump == hex {
+                    // Exit out if we'd infinitey loop.
+                    dist = 0;
+                    break;
+                }
+            }
+            if dist > 1 {
+                n += 1;
+            }
+        }
+        n
     }
 
     fn generate_walk1(&self, hex: Tile, turns: &mut Vec<Action>) {
@@ -215,6 +329,34 @@ impl Board {
         }
     }
 
+    fn generate_walk1_n(&self, hex: Tile) -> usize {
+        let mut buf = [0; 6];
+        self.slidable_adjacent(&mut buf, hex, hex).count()
+    }
+
+    fn generate_walk3_n(&self, orig: Tile) -> usize {
+        let mut buf1 = [0; 6];
+        let mut buf2 = [0; 6];
+        let mut buf3 = [0; 6];
+        let mut visited = TileSet::new();
+        visited.set(orig);
+        let mut n = 0;
+
+        for s1 in self.slidable_adjacent(&mut buf1, orig, orig) {
+            for s2 in self.slidable_adjacent(&mut buf2, orig, s1) {
+                if s2 != orig {
+                    for s3 in self.slidable_adjacent(&mut buf3, orig, s2) {
+                        if s3 != s1 && !visited.get(s3) {
+                            n += 1;
+                            visited.set(s3);
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
     fn generate_walk_all(&self, orig: Tile, turns: &mut Vec<Action>) {
         let mut visited = TileSet::new();
         let mut queue = [0; 16];
@@ -240,6 +382,33 @@ impl Board {
         }
     }
 
+    fn generate_walk_all_n(&self, hex: Tile) -> usize {
+        let mut visited = TileSet::new();
+        let mut queue = [0; 16];
+        queue[0] = hex;
+        let mut qsize = 1;
+        let mut buf = [0; 6];
+        let mut n = 0;
+        while qsize > 0 {
+            qsize -= 1;
+            let node = queue[qsize];
+            if visited.get(node) {
+                continue;
+            }
+            visited.set(node);
+            if node != hex {
+                n += 1;
+            }
+            for adj in self.slidable_adjacent(&mut buf, hex, node) {
+                if !visited.get(adj) {
+                    queue[qsize] = adj;
+                    qsize += 1;
+                }
+            }
+        }
+        n
+    }
+
     fn generate_ladybug(&self, hex: Tile, turns: &mut Vec<Action>) {
         let mut buf1 = [0; 6];
         let mut buf2 = [0; 6];
@@ -261,6 +430,31 @@ impl Board {
                 }
             }
         }
+    }
+
+    fn generate_ladybug_n(&self, hex: Tile) -> usize {
+        let mut buf1 = [0; 6];
+        let mut buf2 = [0; 6];
+        let mut buf3 = [0; 6];
+        let mut step2 = TileSet::new();
+        let mut step3 = TileSet::new();
+        let mut n = 0;
+        for s1 in self.slidable_adjacent_beetle(&mut buf1, hex, hex) {
+            if self.occupied(s1) {
+                for s2 in self.slidable_adjacent_beetle(&mut buf2, hex, s1) {
+                    if self.occupied(s2) && !step2.get(s2) {
+                        step2.set(s2);
+                        for s3 in self.slidable_adjacent_beetle(&mut buf3, hex, s2) {
+                            if !self.occupied(s3) && !step3.get(s3) {
+                                step3.set(s3);
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        n
     }
 
     fn generate_throws(
@@ -295,6 +489,29 @@ impl Board {
                 throw_ends.set(end);
             }
         }
+    }
+
+    fn generate_throws_n(
+        &self, immovable: &TileSet, hex: Tile
+    ) -> usize {
+        let mut num_starts = 0;
+        let mut num_ends = 0;
+        let mut buf = [0; 6];
+        let origin = hex + Direction::NW + Direction::NW; // something not adjacent
+        for adj in self.slidable_adjacent_beetle(&mut buf, origin, hex) {
+            match self.height(adj) {
+                0 => {
+                    num_ends += 1;
+                }
+                1 => {
+                    if !immovable.get(adj) {
+                        num_starts += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return num_starts * num_ends;
     }
 
     fn generate_mosquito(&self, hex: Tile, turns: &mut Vec<Action>) {
@@ -343,6 +560,43 @@ impl Board {
                 }
             }
         }
+    }
+
+    pub fn generate_mosquito_n(&self, hex: Tile) -> usize {
+        let mut targets = [false; 8];
+        for adj in adjacent(hex) {
+            let node = self.tile(adj);
+            if node.is_some() {
+                targets[node.ptype() as usize] = true;
+            }
+        }
+
+        let mut n = 0;
+        if targets[Pct::Ant as usize] {
+            n += self.generate_walk_all_n(hex);
+        } else {
+            // Avoid adding strictly duplicative moves to the ant.
+            if targets[Pct::Queen as usize]
+                || targets[Pct::Beetle as usize]
+                || targets[Pct::Pillbug as usize]
+            {
+                n += self.generate_walk1_n(hex);
+            }
+            if targets[Pct::Spider as usize] {
+                n += self.generate_walk3_n(hex);
+            }
+        }
+        if targets[Pct::Grasshopper as usize] {
+            n += self.generate_jumps_n(hex);
+        }
+        if targets[Pct::Beetle as usize] {
+            n += self.generate_stack_walking_n(hex);
+        }
+        if targets[Pct::Ladybug as usize] {
+            n += self.generate_ladybug_n(hex);
+        }
+
+        n
     }
 
     pub(crate) fn generate_movements(&self, turns: &mut Vec<Action>) {
@@ -477,7 +731,113 @@ impl Board {
 
         turns
     }
+
+    pub fn generate_movements_n(self: &Board) -> usize {
+        let mut immovable = self.find_cut_vertexes();
+        let stunned = match self.turn_history.last() {
+            Some(Action::Move(_, dest)) => Some(dest),
+            _ => None,
+        };
+        if let Some(moved) = stunned {
+            immovable.set(*moved);
+        }
+
+        let mut num = 0;
+
+        for hex in self.occupied_tiles[self.color().index()].iter() {
+            if stunned == Some(hex) {
+                continue;
+            }
+            if self.tile(*hex).ptype() == Pct::Pillbug
+                || (self.tile(*hex).ptype() == Pct::Mosquito
+                    && !self.is_stacked(*hex)
+                    && adjacent(*hex).iter().any(|&adj| {
+                        let n = self.tile(adj);
+                        n.is_some() && n.ptype() == Pct::Pillbug
+                    }))
+            {
+                num += self.generate_throws_n(&immovable, *hex);
+            }
+        }
+        
+        for &hex in self.occupied_tiles[self.color() as usize].iter() {
+            let node = self.tile(hex);
+            if self.is_stacked(hex) {
+                num += self.generate_stack_walking_n(hex);
+                continue;
+            }
+            if immovable.get(hex) {
+                continue;
+            }
+            num += match node.ptype() {
+                Pct::Queen => self.generate_walk1_n(hex),
+                Pct::Grasshopper => self.generate_jumps_n(hex),
+                Pct::Spider => self.generate_walk3_n(hex),
+                //Pct::Ant => self.generate_walk_all_n(hex),
+                Pct::Beetle => 
+                    self.generate_walk1_n(hex) +
+                    self.generate_stack_walking_n(hex)
+                ,
+                //Pct::Mosquito => self.generate_mosquito_n(hex),
+                Pct::Ladybug => self.generate_ladybug_n(hex),
+                Pct::Pillbug => self.generate_walk1_n(hex),
+                _ => 0,
+            };
+/* 
+            // Dedup against pillbug throws.
+            if throw_starts.get(hex) {
+                let mut i = marker;
+                while i < turns.len() {
+                    let turn = turns[i];
+                    let end = match turn {
+                        Action::Move(_, end) => end,
+                        _ => {
+                            i += 1;
+                            continue;
+                        }
+                    };
+                    if throw_ends.get(end) && turns[first_move..num_throws].contains(&turn) {
+                        turns.swap_remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }*/
+        }
+
+
+        num
+    }
+
+    pub fn generate_moves_n(self: &Board) -> usize {
+        let remaining = self.placeable[self.color().index()];
+        if self.turn_num < 2 {
+            // Special case for the first 2 turns:
+            if self.turn_num == 0 {
+                return Pct::iter_all()
+                    .filter(|&bug| bug != Pct::Queen && remaining[bug as usize] > 0)
+                    .count();
+            } else {
+                return Pct::iter_all()
+                    .filter(|&bug| bug != Pct::Queen && remaining[bug as usize] > 0)
+                    .count() * 6; // 6 adjacent tiles
+            }
+        }
+        
+        let mut n_moves: usize = 0;
+
+        if remaining[Pct::Queen as usize] == 0 {
+            // For movable pieces, generate all legal moves.
+            n_moves += self.generate_movements_n();
+
+        }
+        if remaining.iter().any(|&num| num > 0) {
+            n_moves += self.generate_placements_n();
+        }
+        max(1,n_moves)
+    }
 }
+
 
 #[test]
 fn test_first_move(){
