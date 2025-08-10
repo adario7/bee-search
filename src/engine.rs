@@ -359,7 +359,7 @@ impl Engine {
         }
 
         // futility pruning
-        if depth <= 4 && eval > beta + 150 + 120 * depth as Eval && eval.abs() < 6000 {
+        if depth <= 4 && eval as i64 > beta as i64 + 150 + 120 * depth as i64 && eval.abs() < 6000 {
             return Some(self.fail_high(eval, beta));
         }
 
