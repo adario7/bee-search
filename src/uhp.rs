@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::board::{Board, TOT_QTY};
 use crate::engine::{Depth, Engine};
+use crate::eval::FEATURES_EVAL;
 use crate::perft;
 use crate::piece::Piece;
 
@@ -48,16 +49,16 @@ impl Uhp {
     fn info(&mut self) -> UhpResult<()> {
         let version = env!("CARGO_PKG_VERSION");
         let hash = env!("GIT_HASH");
-        
-        let profile = if cfg!(debug_assertions) {
-            "-DEBUG"
-        } else {
-            ""
-        };
-        print!("id bee-search {}-{}{}", version, hash, profile);
+        print!("id bee-search {}-{}", version, hash);
         #[cfg(feature = "gnn")]
         {
             print!("-GNN");
+        }
+        if FEATURES_EVAL {
+            print!("-F");
+        }
+        if cfg!(debug_assertions) {
+            print!("-DEBUG");
         }
         println!();
         println!("Mosquito;Ladybug;Pillbug");
@@ -218,21 +219,9 @@ impl Uhp {
         Ok(())
     }
 
-    fn global_features(&mut self) -> UhpResult<()> {
-        println!("queen_score: {}", self.board.queen_score());
-        println!("other_queen_score: {}", self.board.other_queen_score());
-        println!("n_moves: {}", self.board.n_moves());
-        println!("other_n_moves: {}", self.board.other_n_moves());
-        print!("tiles_placed: ");
-        for i in 0..8 {
-            print!("{} ", TOT_QTY[i] - self.board.placeable[self.board.color().index()][i]);
-        }
-        println!();
-        print!("other_tiles_placed: ");
-        for i in 0..8 {
-            print!("{} ", TOT_QTY[i] - self.board.placeable[self.board.color().other().index()][i]);
-        }
-        println!();
+    fn features(&mut self) -> UhpResult<()> {
+        let f = self.board.features();
+        println!("{}", f.iter().map(|&x| x.to_string()).collect::<Vec<_>>().join(";"));
         Ok(())
     }
 
@@ -261,7 +250,7 @@ impl Uhp {
             "perft" => self.perft(args),
             "eval" => self.eval(args),
             "graph" => self.print_graph(),
-            "global_features" => self.global_features(),
+            "features" => self.features(),
             "static_eval" => self.static_eval(),
             _ => Err(UhpError::UnrecognizedCommand(command.to_string())),
         };
