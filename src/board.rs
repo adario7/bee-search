@@ -55,6 +55,7 @@ pub struct Board {
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
 
+    #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
 }
 
@@ -86,6 +87,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
+            #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
     }
@@ -124,6 +126,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
+            #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
     }

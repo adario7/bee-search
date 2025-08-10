@@ -57,6 +57,7 @@ impl Board {
         my_score - their_score
     }
 
+    #[cfg(feature = "gnn")]
     pub fn gnn_eval(&mut self) -> Eval {
         let graph = self.get_graph();
         self.gnn.evaluate(&graph).unwrap_or(0.0) as Eval
