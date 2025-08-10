@@ -1,4 +1,4 @@
-use std::cmp::{max};
+use std::cmp::{min, max};
 use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
 
 
@@ -70,7 +70,7 @@ impl Board {
     // Linear algorithm to find all cut vertexes.
     // Algorithm explanation: https://web.archive.org/web/20180830110222/https://www.eecs.wsu.edu/~holder/courses/CptS223/spr08/slides/graphapps.pdf
     // Example code: https://cp-algorithms.com/graph/cutpoints.html
-    /*pub(crate) fn find_cut_vertexes(&self) -> TileSet {
+    pub(crate) fn find_cut_vertexes(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             visited: TileSet,
@@ -124,8 +124,9 @@ impl Board {
             || self.occupied_tiles[self.color().index()].first().unwrap_or(&TILE_ZERO));
         dfs(&mut state, start, start);
         state.immovable
-    }*/
+    }
 
+    /* 
     pub(crate) fn find_cut_vertexes(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
@@ -180,6 +181,7 @@ impl Board {
 
         state.immovable
     }
+    */
 
     // For a position on the outside (whether occupied or not), find all
     // adjacent locations still connected to the hive that are slidable.

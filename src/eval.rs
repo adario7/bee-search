@@ -20,7 +20,7 @@ impl Board {
 
     pub fn other_n_moves(&mut self) -> usize {
         self.turn_num += 1;
-        let n_moves = self.generate_moves_n();
+        let n_moves = self.generate_moves().len();
         self.turn_num -= 1;
         n_moves
     }
@@ -30,7 +30,7 @@ impl Board {
         {
             return self.gnn_eval();
         }
-        let my_moves_n = self.generate_moves_n();
+        let my_moves_n = self.generate_moves().len();
         self.static_eval_fast(my_moves_n)
     }
 
@@ -47,7 +47,7 @@ impl Board {
         } else {
             let my_score = self.score(my_moves_n);
             self.turn_num += 1;
-            let their_move_n = self.generate_moves_n();
+            let their_move_n = self.generate_moves().len();
             let their_score = self.score(their_move_n);
             self.turn_num -= 1;
             my_score - their_score
