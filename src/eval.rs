@@ -14,14 +14,6 @@ impl Board {
         }
     }
 
-    fn other_queen_score(&self) -> Eval {
-        let color = self.color().other();
-        match self.queens[color.index()] {
-            Some(tile) => adjacent(tile).iter().filter(|&&t| self.tile(t).is_none()).count() as Eval,
-            None => 5
-        }
-    }
-
     fn score(&self, my_moves_n: usize) -> Eval {
         1000 * self.queen_score() + my_moves_n as Eval
     }

@@ -2,11 +2,10 @@ use std::io::stdin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::board::{Board, TOT_QTY};
+use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::eval::FEATURES_EVAL;
 use crate::perft;
-use crate::piece::Piece;
 
 pub struct Uhp {
     board: Board,
@@ -180,7 +179,10 @@ impl Uhp {
         Ok(())
     }
 
+    #[cfg(feature = "gnn")]
     fn print_graph(&self) -> UhpResult<()> {
+        use crate::piece::Piece;
+
         let graph = self.board.get_graph();
         println!("{} ", graph.nodes.len());
         for node in &graph.nodes {
@@ -249,6 +251,7 @@ impl Uhp {
             // secret commands
             "perft" => self.perft(args),
             "eval" => self.eval(args),
+            #[cfg(feature = "gnn")]
             "graph" => self.print_graph(),
             "features" => self.features(),
             "static_eval" => self.static_eval(),

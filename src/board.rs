@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
+#[cfg(feature = "gnn")]
 use crate::graph_nn::GnnEvaluator;
 
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
@@ -13,6 +14,7 @@ use std::sync::OnceLock;
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
+#[cfg(feature = "gnn")]
 static GNN_PATH: &str = "models/hive_gnn.onnx";
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
