@@ -8,7 +8,7 @@ import pickle
 default_engine_path = "build/release/bee-search"
 FEATURES_LEN = 12
 
-def get_engine_eval(engine_path, positions, depth=5, timeout = 120):
+def get_engine_eval(engine_path, positions, depth=5, timeout=120):
     engine = Engine(engine_path)
 
     engine.send("newgame Base")
@@ -21,17 +21,17 @@ def get_engine_eval(engine_path, positions, depth=5, timeout = 120):
         raise TimeoutError("Engine didn't respond")
 
     scores = []
-    
+
     for position in tqdm(positions):
         try:
             engine.send(f"newgame {position}")
             result = engine.receive(timeout=1)
             if len(result) == 0:
                 raise TimeoutError("Engine didn't respond")
-            
+
             engine.send(f"eval {depth}")
             result = engine.receive(timeout=timeout)
-            
+
             if len(result) != 0:
                 result = result[0]
 
@@ -42,9 +42,9 @@ def get_engine_eval(engine_path, positions, depth=5, timeout = 120):
                     pos["position"] = position
                     pos["evaluation"] = int(result)
 
-                    engine.send('static_eval')
+                    engine.send("static_eval")
                     result = engine.receive(timeout=1)
-                    if len(result) > 0 and (result[0].isdigit() or (result[0][0] == '-' and result[0][1:].isdigit())):
+                    if len(result) > 0 and (result[0].isdigit() or (result[0][0] == "-" and result[0][1:].isdigit())):
                         pos["static_eval"] = int(result[0])
 
                     scores.append(pos)
@@ -75,7 +75,6 @@ def load_results(results_file):
         return json.load(f)
 
 def get_positions_from_results(results_paths, engine):
-
     positions = []
 
     for path in results_paths:
@@ -83,8 +82,8 @@ def get_positions_from_results(results_paths, engine):
         results = load_results(path)
 
         for result in tqdm(results):
-            tmp = result["final_gamestate"].split(';')
-            
+            tmp = result["final_gamestate"].split(";")
+
             gametype = tmp[0]
             moves = tmp[3:]
 
@@ -92,13 +91,13 @@ def get_positions_from_results(results_paths, engine):
             position = engine.receive(timeout=1)
             if len(position) == 0:
                 raise TimeoutError("Engine didn't respond")
-            
+
             for move in moves:
                 engine.send(f"play {move}")
                 position = engine.receive(timeout=1)
                 if len(position) == 0:
                     raise TimeoutError("Engine didn't respond")
-                
+
                 positions.append(position[0])
 
     positions = set(positions)
@@ -107,7 +106,6 @@ def get_positions_from_results(results_paths, engine):
     return positions
 
 def get_graph_from_positions(positions, engine):
-
     graphs = []
 
     print("Generating graphs...")
@@ -133,12 +131,12 @@ def get_graph_from_positions(positions, engine):
         features = np.zeros((n, FEATURES_LEN), dtype=np.float32)
         up_to += n
         for i in range(n):
-            features[i] = np.array([float(x) for x in result[up_to + i].split(' ')])
+            features[i] = np.array([float(x) for x in result[up_to + i].split(" ")])
 
         up_to += n
         edges = np.zeros((n, n), dtype=bool)
         for i in range(n):
-            edges[i] = np.array([int(x) for x in result[up_to + i].split(' ')])
+            edges[i] = np.array([int(x) for x in result[up_to + i].split(" ")])
 
         up_to += n
         pieces_on_tile = []
@@ -148,23 +146,21 @@ def get_graph_from_positions(positions, engine):
             if height == 0:
                 pieces_on_tile.append(None)
                 continue
-            
+
             height -= 1
-            top_piece = [int(x) for x in result[up_to].split(' ')]
+            top_piece = [int(x) for x in result[up_to].split(" ")]
             up_to += 1
-            pieces = [[int(x) for x in result[i].split(' ')] for i in range(up_to, up_to + height)]
+            pieces = [[int(x) for x in result[j].split(" ")] for j in range(up_to, up_to + height)]
             pieces = [top_piece] + pieces[::-1]
             pieces_on_tile.append(pieces)
 
-
             up_to += height
+
         graphs.append({"position": position, "graph": [nodes, features, edges], "pieces_on_tile": pieces_on_tile})
 
     return graphs
 
-
 def get_global_features_from_positions(positions, engine):
-
     global_features = []
 
     print("Generating global features...")
@@ -206,21 +202,18 @@ def get_global_features_from_positions(positions, engine):
 
     return global_features
 
-
-
 def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluate):
     existing_evals = load_results(evals_path)
-    evals_map = {e['position']: e for e in existing_evals}
+    evals_map = {e["position"]: e for e in existing_evals}
 
     positions_to_eval = []
     num_present_diff_params = 0
     num_missing = 0
-    
+
     for pos in all_positions:
         if pos in evals_map:
             existing_eval = evals_map[pos]
-            is_different = (existing_eval.get('depth') != depth or
-                            existing_eval.get('engine') != engine_name)
+            is_different = (existing_eval.get("depth") != depth or existing_eval.get("engine") != engine_name)
             if is_different:
                 num_present_diff_params += 1
                 if reevaluate:
@@ -236,44 +229,57 @@ def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluat
 
     return positions_to_eval, evals_map
 
-
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Evaluate positions using the Hive engine.")
-    parser.add_argument('--results-paths', type=str, nargs='+', default=['logs/results.json'],
-                        help='List of result files.')
-    parser.add_argument('--engine', type=str, default=default_engine_path,
-                        help='Path to the Hive engine executable.')
-    parser.add_argument('--depth', type=int, default=5,
-                        help='Depth for engine evaluation.')
-    parser.add_argument('--timeout', type=int, default=10,
-                        help='Timeout for engine responses in seconds.')
-    parser.add_argument('--evals-path', type=str, default='logs/evaluations.json',
-                        help='Path to save the evaluations JSON file.')
-    parser.add_argument('--reevaluate', action='store_true',
-                        help='Re-evaluate positions if depth or engine name are different from the one we are using now.')
-    parser.add_argument('--global-features-path', type=str, default=None,
-                        help='Path to save the global features JSON file.')
-    parser.add_argument('--graphs-path', type=str, default=None,
-                        help='Path to save the graphs pickle file.')
+    parser.add_argument("--results-paths", type=str, nargs="+", default=["logs/results.json"],
+                        help="List of result files.")
+    parser.add_argument("--engine", type=str, default=default_engine_path,
+                        help="Path to the Hive engine executable.")
+    parser.add_argument("--depth", type=int, default=5,
+                        help="Depth for engine evaluation.")
+    parser.add_argument("--timeout", type=int, default=10,
+                        help="Timeout for engine responses in seconds.")
+    parser.add_argument("--evals-path", type=str, default="logs/evaluations.json",
+                        help="Path to save the evaluations JSON file.")
+    parser.add_argument("--reevaluate", action="store_true",
+                        help="Re-evaluate positions if depth or engine name are different from the one we are using now.")
+    parser.add_argument("--global-features-path", type=str, default=None,
+                        help="Path to save the global features JSON file.")
+    parser.add_argument("--graphs-path", type=str, default=None,
+                        help="Path to save the graphs pickle file.")
 
     args = parser.parse_args()
 
     engine = Engine(args.engine)
     positions = list(get_positions_from_results(args.results_paths, engine))
-    
+
     current_engine_name = engine.name
-   
+
     # Plan the evaluation run
     positions_to_eval, evals_map = plan_evaluation_run(positions, args.evals_path, args.depth, current_engine_name, args.reevaluate)
 
     # Run evaluation on the filtered list
     if positions_to_eval:
         print(f"Evaluating {len(positions_to_eval)} positions...")
-        evals = get_engine_eval(engine_path=args.engine, positions=positions_to_eval, depth=args.depth, timeout=args.timeout)
-        # Update the main map with new/updated results
-        for e in evals:
-            evals_map[e['position']] = e
+        chunk_size = 1000
+        processed = 0
+        for i in range(0, len(positions_to_eval), chunk_size):
+            chunk = positions_to_eval[i:i + chunk_size]
+            try:
+                evals = get_engine_eval(engine_path=args.engine, positions=chunk, depth=args.depth, timeout=args.timeout)
+                for e in evals:
+                    evals_map[e["position"]] = e
+                processed += len(chunk)
+                # Save after each chunk so we don't lose progress (including re-evaluations)
+                with open(args.evals_path, "w") as f:
+                    json.dump(list(evals_map.values()), f, indent=1)
+                print(f"Saved {len(evals_map)} evaluations to {args.evals_path} after processing {processed} positions")
+            except Exception:
+                # on exception, persist what we have and re-raise
+                with open(args.evals_path, "w") as f:
+                    json.dump(list(evals_map.values()), f, indent=1)
+                raise
     else:
         print("No new positions to evaluate.")
 
@@ -291,4 +297,3 @@ if __name__ == "__main__":
         graphs = get_graph_from_positions(positions=positions, engine=engine)
         with open(args.graphs_path, "wb") as f:
             pickle.dump(graphs, f)
-            
