@@ -1,4 +1,4 @@
-use std::cmp::{min, max};
+use std::{cell::OnceCell, cmp::{max, min}};
 use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
 
 
@@ -384,31 +384,59 @@ impl Board {
         }
     }
 
-    fn generate_walk_all_n(&self, hex: Tile) -> usize {
-        let mut visited = TileSet::new();
-        let mut queue = [0; 16];
-        queue[0] = hex;
-        let mut qsize = 1;
-        let mut buf = [0; 6];
-        let mut n = 0;
-        while qsize > 0 {
-            qsize -= 1;
-            let node = queue[qsize];
-            if visited.get(node) {
-                continue;
-            }
-            visited.set(node);
-            if node != hex {
-                n += 1;
-            }
-            for adj in self.slidable_adjacent(&mut buf, hex, node) {
-                if !visited.get(adj) {
-                    queue[qsize] = adj;
-                    qsize += 1;
+    fn generate_walk_all_n<'a>(&self, hex: Tile, get_cc_size: impl Fn() -> &'a [u8; GRID_SIZE], num_ant: i32) -> usize {
+        if num_ant < 2 {
+            let mut visited = TileSet::new();
+            let mut queue = [0; 16];
+            queue[0] = hex;
+            let mut qsize = 1;
+            let mut buf = [0; 6];
+            let mut n = 0;
+            while qsize > 0 {
+                qsize -= 1;
+                let node = queue[qsize];
+                if visited.get(node) {
+                    continue;
+                }
+                visited.set(node);
+                if node != hex {
+                    n += 1;
+                }
+                for adj in self.slidable_adjacent(&mut buf, hex, node) {
+                    if !visited.get(adj) {
+                        queue[qsize] = adj;
+                        qsize += 1;
+                    }
                 }
             }
+            return n;
         }
-        n
+        else {
+            let mut vals = [0; 4];
+            let mut it = 0;
+            let mut n = 0;
+            let mut buf = [0; 6];
+            let cc_size = get_cc_size();
+
+            for adj in self.slidable_adjacent(&mut buf, hex, hex) {
+                let tot = cc_size[adj as usize];
+                let mut flg = true;
+                for i in 0..it {
+                    if vals[i] == tot {
+                        flg = false;
+                        break;
+                    }
+                }
+
+                if flg {
+                    n += tot;
+                    vals[it] = tot;
+                    it += 1;
+                }
+            }
+            return n as usize;
+        }
+        
     }
 
     fn generate_ladybug(&self, hex: Tile, turns: &mut Vec<Action>) {
@@ -564,7 +592,7 @@ impl Board {
         }
     }
 
-    pub fn generate_mosquito_n(&self, hex: Tile) -> usize {
+    pub fn generate_mosquito_n<'a>(&self, hex: Tile, get_cc_size: impl Fn() -> &'a [u8; GRID_SIZE], num_ant: i32) -> usize {
         let mut targets = [false; 8];
         for adj in adjacent(hex) {
             let node = self.tile(adj);
@@ -575,7 +603,7 @@ impl Board {
 
         let mut n = 0;
         if targets[Pct::Ant as usize] {
-            n += self.generate_walk_all_n(hex);
+            n += self.generate_walk_all_n(hex, get_cc_size, num_ant);
         } else {
             // Avoid adding strictly duplicative moves to the ant.
             if targets[Pct::Queen as usize]
@@ -734,6 +762,49 @@ impl Board {
         turns
     }
 
+    fn generate_cc_slidable(self: &Board) -> [u8; GRID_SIZE] {
+        let mut cc_size = [0u8; GRID_SIZE];
+        let mut vis = TileSet::new();
+        let mut queue = [0; 64];
+        let mut qsize;
+        let mut buf = [0; 6];
+        let mut n;
+
+        for hex in self.occupied_tiles[self.color().index()].iter() {
+            for adj in adjacent(*hex) {
+                if vis.get(adj) || self.tile(adj).is_some() {
+                    continue;
+                }
+
+                qsize = 1;
+                n = 0;
+                queue[0] = adj;
+                
+                while n < qsize {
+                    let node = queue[n];
+                    if vis.get(node) {
+                        n += 1;
+                        continue;
+                    }
+                    vis.set(node);
+                    for adj in self.slidable_adjacent(&mut buf, GRID_SIZE as Tile, node) {
+                        if !vis.get(adj) {
+                            queue[qsize] = adj;
+                            qsize += 1;
+                        }
+                    }
+                    n += 1;
+                }
+
+                for i in 0..qsize {
+                    cc_size[queue[i] as usize] = n as u8;
+                }
+            }
+        }
+
+        cc_size
+    }
+
     pub fn generate_movements_n(self: &Board) -> usize {
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
@@ -745,6 +816,7 @@ impl Board {
         }
 
         let mut num = 0;
+        let mut num_ant = 0;
 
         for hex in self.occupied_tiles[self.color().index()].iter() {
             if stunned == Some(hex) {
@@ -760,8 +832,22 @@ impl Board {
             {
                 num += self.generate_throws_n(&immovable, *hex);
             }
+
+            if self.tile(*hex).ptype() == Pct::Ant 
+                || (self.tile(*hex).ptype() == Pct::Mosquito
+                    && !self.is_stacked(*hex)
+                    && adjacent(*hex).iter().any(|&adj| {
+                        let n = self.tile(adj);
+                        n.is_some() && n.ptype() == Pct::Ant
+                    }))
+            {
+                num_ant += 1;
+            }
         }
-        
+
+        let cc_size = OnceCell::new();
+        let get_cc_size = || cc_size.get_or_init(|| self.generate_cc_slidable()); //size of connected component of slidable adjacent cells
+
         for &hex in self.occupied_tiles[self.color() as usize].iter() {
             let node = self.tile(hex);
             if self.is_stacked(hex) {
@@ -775,15 +861,14 @@ impl Board {
                 Pct::Queen => self.generate_walk1_n(hex),
                 Pct::Grasshopper => self.generate_jumps_n(hex),
                 Pct::Spider => self.generate_walk3_n(hex),
-                //Pct::Ant => self.generate_walk_all_n(hex),
+                Pct::Ant => self.generate_walk_all_n(hex, get_cc_size, num_ant),
                 Pct::Beetle => 
                     self.generate_walk1_n(hex) +
                     self.generate_stack_walking_n(hex)
                 ,
-                //Pct::Mosquito => self.generate_mosquito_n(hex),
+                Pct::Mosquito => self.generate_mosquito_n(hex, get_cc_size, num_ant),
                 Pct::Ladybug => self.generate_ladybug_n(hex),
                 Pct::Pillbug => self.generate_walk1_n(hex),
-                _ => 0,
             };
 /* 
             // Dedup against pillbug throws.

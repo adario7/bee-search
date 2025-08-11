@@ -1,4 +1,4 @@
-use crate::{abstractions::TileSet, board::Board, piece::Color, tile::adjacent};
+use crate::{abstractions::TileSet, board::Board, eval::HEURISTIC, piece::Color, tile::adjacent};
 
 impl Board {
     pub const FN: usize = 17;
@@ -62,7 +62,11 @@ impl Board {
     }
 
     pub fn features(&mut self) -> [i64; Self::FN2] {
-        let my_n = self.generate_moves_n();
+        let my_n = if HEURISTIC {
+            self.generate_moves_n()
+        } else {
+            self.generate_moves().len()
+        };
         self.features_fast(my_n)
     }
 }

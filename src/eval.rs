@@ -4,6 +4,7 @@ pub type Eval = i16;
 pub type Value = Eval;
 
 pub const FEATURES_EVAL: bool = true;
+pub const HEURISTIC: bool = true;
 
 impl Board {
     fn queen_score(&self) -> Eval {
@@ -20,7 +21,11 @@ impl Board {
 
     pub fn other_n_moves(&mut self) -> usize {
         self.turn_num += 1;
-        let n_moves = self.generate_moves().len();
+        let n_moves= if HEURISTIC {
+            self.generate_moves_n()
+        } else {
+            self.generate_moves().len()
+        };
         self.turn_num -= 1;
         n_moves
     }
@@ -30,7 +35,11 @@ impl Board {
         {
             return self.gnn_eval();
         }
-        let my_moves_n = self.generate_moves().len();
+        let my_moves_n = if HEURISTIC {
+            self.generate_moves_n()
+        } else {
+            self.generate_moves().len()
+        };
         self.static_eval_fast(my_moves_n)
     }
 
@@ -47,7 +56,7 @@ impl Board {
         } else {
             let my_score = self.score(my_moves_n);
             self.turn_num += 1;
-            let their_move_n = self.generate_moves().len();
+            let their_move_n = self.generate_moves_n();
             let their_score = self.score(their_move_n);
             self.turn_num -= 1;
             my_score - their_score
