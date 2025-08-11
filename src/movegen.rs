@@ -1,6 +1,7 @@
 use std::cmp::{min, max};
 use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
 
+const APPROX_MOVE_N: bool = true;
 
 impl Board {
     fn generate_placements(&self, turns: &mut Vec<Action>) {
@@ -775,36 +776,15 @@ impl Board {
                 Pct::Queen => self.generate_walk1_n(hex),
                 Pct::Grasshopper => self.generate_jumps_n(hex),
                 Pct::Spider => self.generate_walk3_n(hex),
-                //Pct::Ant => self.generate_walk_all_n(hex),
+                Pct::Ant => self.generate_walk_all_n(hex),
                 Pct::Beetle => 
                     self.generate_walk1_n(hex) +
                     self.generate_stack_walking_n(hex)
                 ,
-                //Pct::Mosquito => self.generate_mosquito_n(hex),
+                Pct::Mosquito => self.generate_mosquito_n(hex),
                 Pct::Ladybug => self.generate_ladybug_n(hex),
                 Pct::Pillbug => self.generate_walk1_n(hex),
-                _ => 0,
             };
-/* 
-            // Dedup against pillbug throws.
-            if throw_starts.get(hex) {
-                let mut i = marker;
-                while i < turns.len() {
-                    let turn = turns[i];
-                    let end = match turn {
-                        Action::Move(_, end) => end,
-                        _ => {
-                            i += 1;
-                            continue;
-                        }
-                    };
-                    if throw_ends.get(end) && turns[first_move..num_throws].contains(&turn) {
-                        turns.swap_remove(i);
-                    } else {
-                        i += 1;
-                    }
-                }
-            }*/
         }
 
 
@@ -812,6 +792,10 @@ impl Board {
     }
 
     pub fn generate_moves_n(self: &Board) -> usize {
+        if !APPROX_MOVE_N {
+            return self.generate_moves().len();
+        }
+
         let remaining = self.placeable[self.color().index()];
         if self.turn_num < 2 {
             // Special case for the first 2 turns:

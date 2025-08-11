@@ -20,7 +20,7 @@ impl Board {
 
     pub fn other_n_moves(&mut self) -> usize {
         self.turn_num += 1;
-        let n_moves = self.generate_moves().len();
+        let n_moves = self.generate_moves_n();
         self.turn_num -= 1;
         n_moves
     }
@@ -30,7 +30,7 @@ impl Board {
         {
             return self.gnn_eval();
         }
-        let my_moves_n = self.generate_moves().len();
+        let my_moves_n = self.generate_moves_n();
         self.static_eval_fast(my_moves_n)
     }
 
