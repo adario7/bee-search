@@ -1,6 +1,7 @@
 use std::{cell::OnceCell, cmp::{max, min}};
 use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
 
+const APPROX_MOVE_N: bool = true;
 
 impl Board {
     fn generate_placements(&self, turns: &mut Vec<Action>) {
@@ -897,6 +898,10 @@ impl Board {
     }
 
     pub fn generate_moves_n(self: &Board) -> usize {
+        if !APPROX_MOVE_N {
+            return self.generate_moves().len();
+        }
+
         let remaining = self.placeable[self.color().index()];
         if self.turn_num < 2 {
             // Special case for the first 2 turns:
