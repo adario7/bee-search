@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 NORMAL_MODEL_PATH = "build/engines/normal/bee-search"
 
 FEATURES_LEN = 12
+CLIP = 6000
 
 class HiveGNN(nn.Module):
     def __init__(self, input_dim=12, hidden_dim=64, num_gnn_layers=3, dropout=0.2, use_gat=True, heads=2):
@@ -81,7 +82,7 @@ class HiveGNN(nn.Module):
 
         global_repr = torch.cat([mean_pool, max_pool], dim=-1)
         evaluation = self.mlp_head(global_repr)
-        return torch.tanh(evaluation) * 1.5
+        return evaluation * CLIP
 
 
 def create_node_features(board_state, device):
@@ -140,7 +141,7 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False, static
                 evaluation = eval['static_eval'] if 'static_eval' in eval.keys() else get_static_eval(eval, engine)
             else:
                 evaluation = eval["evaluation"]
-            evaluation = np.clip(evaluation, -6000, 6000) / 6000.0
+            evaluation = np.clip(evaluation, -CLIP, CLIP)
             data_list.append(Data(
                 x=create_node_features(features, device),
                 edge_index=create_adjacency_matrix(edges, device),

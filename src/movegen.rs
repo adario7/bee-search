@@ -871,26 +871,6 @@ impl Board {
                 Pct::Ladybug => self.generate_ladybug_n(hex),
                 Pct::Pillbug => self.generate_walk1_n(hex),
             };
-/* 
-            // Dedup against pillbug throws.
-            if throw_starts.get(hex) {
-                let mut i = marker;
-                while i < turns.len() {
-                    let turn = turns[i];
-                    let end = match turn {
-                        Action::Move(_, end) => end,
-                        _ => {
-                            i += 1;
-                            continue;
-                        }
-                    };
-                    if throw_ends.get(end) && turns[first_move..num_throws].contains(&turn) {
-                        turns.swap_remove(i);
-                    } else {
-                        i += 1;
-                    }
-                }
-            }*/
         }
 
 

@@ -64,7 +64,7 @@ def get_engine_eval(engine_path, positions, depth=5, timeout=120):
             result = engine.receive(timeout=1)
             if len(result) == 0:
                 raise TimeoutError("Engine didn't respond")
-
+    engine.terminate()
     return scores
 
 def load_results(results_file):
@@ -297,3 +297,5 @@ if __name__ == "__main__":
         graphs = get_graph_from_positions(positions=positions, engine=engine)
         with open(args.graphs_path, "wb") as f:
             pickle.dump(graphs, f)
+    
+    engine.terminate()
