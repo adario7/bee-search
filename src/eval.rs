@@ -1,4 +1,4 @@
-use crate::{board::Board, tile::adjacent};
+use crate::{board::Board, movegen::CutVertexes, tile::adjacent};
 
 pub type Eval = i16;
 pub type Value = Eval;
@@ -18,23 +18,23 @@ impl Board {
         1000 * self.queen_score() + my_moves_n as Eval
     }
 
-    pub fn other_n_moves(&mut self) -> usize {
+    pub fn other_n_moves(&mut self, immovable_vertexes: &mut CutVertexes) -> usize {
         self.turn_num += 1;
-        let n_moves = self.generate_moves_n();
+        let n_moves = self.generate_moves_n(immovable_vertexes);
         self.turn_num -= 1;
         n_moves
     }
     
-    pub fn static_eval(&mut self) -> Eval {
+    pub fn static_eval(&mut self, immovable_vertexes: &mut CutVertexes) -> Eval {
         #[cfg(feature = "gnn")]
         {
             return self.gnn_eval();
         }
-        let my_moves_n = self.generate_moves_n();
-        self.static_eval_fast(my_moves_n)
+        let my_moves_n = self.generate_moves_n(immovable_vertexes);
+        self.static_eval_fast(my_moves_n, immovable_vertexes)
     }
 
-    pub fn static_eval_fast(&mut self, my_moves_n: usize) -> Eval {
+    pub fn static_eval_fast(&mut self, my_moves_n: usize, immovable_vertexes: &mut CutVertexes) -> Eval {
         #[cfg(feature = "gnn")]
         {
             return self.gnn_eval();
@@ -44,12 +44,12 @@ impl Board {
             // MSE: 1593901.4749, MAE: 810.2136, R2:  0.7115
             const W0: f64 = 0.0;
             const W: [f64; 34] = [-1015.9385495890275, -1258.8641032119087, -230.7337553197135, -871.5195086839251, 631.681704849666, -1334.0513483719926, 12.645273847124372, 294.557017407922, -46.55545383870309, -834.3379773220444, -62.78093885553172, 380.09345808559357, -13.509943921515106, -130.5575471341165, -135.403450841371, -190.9241310643996, -427.17564807483205, 1015.9385495897571, 1258.864103211562, 230.73375532018252, 871.5195086843385, -631.6817048497805, 1334.05134837225, -12.64527384712494, -294.5570174079467, 46.55545383875793, 834.3379773221393, 62.780938855530025, -380.09345808559937, 13.509943921515037, 130.55754713411417, 135.40345084138434, 190.92413106439415, 427.17564807479783];
-            let f = self.features_fast(my_moves_n);
+            let f = self.features_fast(my_moves_n, immovable_vertexes);
             (W0 + W.iter().zip(f.iter()).map(|(&a, &b)| a * b as f64).sum::<f64>()).round() as Eval
         } else {
             let my_score = self.score(my_moves_n);
             self.turn_num += 1;
-            let their_move_n = self.generate_moves_n();
+            let their_move_n = self.generate_moves_n(immovable_vertexes);
             let their_score = self.score(their_move_n);
             self.turn_num -= 1;
             my_score - their_score

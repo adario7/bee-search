@@ -1,4 +1,4 @@
-use crate::board::{Board, GameResult};
+use crate::{board::{Board, GameResult}, movegen::CutVertexes};
 
 pub fn perft(board: &mut Board, depth: usize) -> usize {
     if depth == 0 {
@@ -8,7 +8,8 @@ pub fn perft(board: &mut Board, depth: usize) -> usize {
     if result != GameResult::InProgress {
         return 1;
     }
-    let moves = board.generate_moves();
+    let mut immovable_vertexes = CutVertexes::new();
+    let moves = board.generate_moves(&mut immovable_vertexes);
     if depth == 1 {
         return moves.len();
     }

@@ -5,6 +5,7 @@ use std::hash::Hasher;
 #[cfg(feature = "gnn")]
 use crate::graph_nn::GnnEvaluator;
 
+use crate::movegen::CutVertexes;
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
 use crate::piece_type::{Pct, PieceType};
@@ -230,8 +231,8 @@ impl Board {
     }
 
     /// very slow!
-    pub fn is_legal(&self, action: Action) -> bool {
-        self.generate_moves().contains(&action)
+    pub fn is_legal(&self, action: Action, immovable_vertexes: &mut CutVertexes) -> bool {
+        self.generate_moves(immovable_vertexes).contains(&action)
     }
 
     /// assumes the action is legal
@@ -395,7 +396,10 @@ mod test {
 
         let mut b1 = Board::new();
         let mut b2 = Board::new();
+        let mut immovable_vertexes1 = CutVertexes::new();
+        let mut immovable_vertexes2 = CutVertexes::new();
 
+        
         let depth = 50;
         let num_runs = 100;
         let num_tries = 100;
@@ -411,7 +415,7 @@ mod test {
                     break;
                 }
 
-                let moves = b1.generate_moves();
+                let moves = b1.generate_moves(&mut immovable_vertexes1);
 
                 if moves.len() > 0 {
                     
@@ -458,14 +462,14 @@ mod test {
                     break;
                 }
 
-                let moves1 = b1.generate_moves();
+                let moves1 = b1.generate_moves(&mut immovable_vertexes1);
                 if moves1.len() > 0 {
                     let mov1 = rng.random_range(0..moves1.len());
                     b1.do_action(moves1[mov1]);
                 }else {
                     b1.do_action(Action::Pass);
                 }
-                let moves2 = b2.generate_moves();
+                let moves2 = b2.generate_moves(&mut immovable_vertexes2);
                 if moves2.len() > 0 {
                     let mov2 = rng.random_range(0..moves2.len());
                     b2.do_action(moves2[mov2]);

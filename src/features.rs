@@ -1,4 +1,4 @@
-use crate::{abstractions::TileSet, board::Board, piece::Color, tile::adjacent};
+use crate::{abstractions::TileSet, board::Board, movegen::CutVertexes, piece::Color, tile::adjacent};
 
 impl Board {
     pub const FN: usize = 17;
@@ -50,9 +50,9 @@ impl Board {
         ]
     }
 
-    pub fn features_fast(&mut self, my_n: usize) -> [i64; Self::FN2] {
-        let immovable = self.find_cut_vertexes(); // TODO pass to movegen
-        let other_n = self.other_n_moves();
+    pub fn features_fast(&mut self, my_n: usize, immovable_vertexes: &mut CutVertexes) -> [i64; Self::FN2] {
+        let immovable = self.find_cut_vertexes(immovable_vertexes); // TODO pass to movegen
+        let other_n = self.other_n_moves(immovable_vertexes);
         let a = self.features_for(self.color(), my_n as i64, &immovable);
         let b = self.features_for(self.color().other(), other_n as i64, &immovable);
         let mut out = [0i64; Self::FN2];
@@ -61,8 +61,8 @@ impl Board {
         out
     }
 
-    pub fn features(&mut self) -> [i64; Self::FN2] {
-        let my_n = self.generate_moves_n();
-        self.features_fast(my_n)
+    pub fn features(&mut self, immovable_vertexes: &mut CutVertexes) -> [i64; Self::FN2] {
+        let my_n = self.generate_moves_n(immovable_vertexes);
+        self.features_fast(my_n, immovable_vertexes)
     }
 }
