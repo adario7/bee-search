@@ -101,6 +101,8 @@ impl Uhp {
             (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
             let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
+            // safety margin
+            let time = time - Duration::from_millis((2.0 + 2.7*(self.num_threads as f64).sqrt()).round() as u64);
             (30, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));

@@ -532,7 +532,7 @@ impl Engine {
         let elapsed = start.elapsed().as_secs_f64();
         let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
         let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);
-        eprintln!("[{} th] explored {} nodes in {:.2}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
+        eprintln!("[{} th] explored {} nodes in {:.4}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
         r
     }
 
