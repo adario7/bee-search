@@ -14,6 +14,16 @@ fn mated_in(ply: Depth) -> Eval {
     -mate_in(ply)
 }
 
+fn display_eval(e: Eval) -> String {
+    if e > WIN {
+        format!("+#{}", WIN + 99 - e)
+    } else if e < -WIN {
+        format!("-#{}", e + WIN + 99)
+    } else {
+        format!("{:+}", e)
+    }
+}
+
 pub struct Engine {
     tt: TTable,
     nnodes: AtomicU64,
@@ -460,7 +470,7 @@ impl Engine {
                             let score = score.unwrap();
                             let elapsed = start.elapsed();
                             let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
-                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, score, td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
+                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, display_eval(score), td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
                         } else {
                             eprintln!("[#{}] depth {}: could not find matching tt entry", td.id, depth);
                         }
