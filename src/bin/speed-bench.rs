@@ -30,13 +30,14 @@ struct Args { // TODO: num threads
 
     #[arg(long, default_value_t=false)]
     movegen_test: bool,
+
+    #[arg(long, default_value_t=1)]
+    num_runs: u32,
 }
 
 fn main() {
     let args = Args::parse();
 
-    let mut board = Board::new();
-    let mut immovable_vertexes = CutVertexes::new();
     let engine = Arc::new(Engine::new());
     let mut total_think_time = Duration::new(0, 0);
     let mut total_nodes = 0;
@@ -56,6 +57,9 @@ fn main() {
         .progress_chars("#>-"));
 
     if args.movegen_test {
+
+        let mut board ;
+        let mut immovable_vertexes = CutVertexes::new();
         for _game in 0..args.n {
             board = Board::new();
 
@@ -91,47 +95,56 @@ fn main() {
         return;
     }
 
-    for move_i in 0..(args.skip + args.n) {
-        let game_status = board.game_result(); //
-        if game_status != GameResult::InProgress { //
-            pb.println(format!("Game ended early. Result: {:?}", game_status));
-            break; // Stop simulation if game is over
+    // Do a series of different runs, then take the average of the times
+    // Should still work well with random seeding 
+    for run_id in 0..args.num_runs { 
+        let mut board = Board::new();
+        let mut immovable_vertexes = CutVertexes::new();
+        println!("Simulating run: {}", run_id);
+        pb.reset();
+        for move_i in 0..(args.skip + args.n) {
+            let game_status = board.game_result(); //
+            if game_status != GameResult::InProgress { //
+                pb.println(format!("Game ended early. Result: {:?}", game_status));
+                break; // Stop simulation if game is over
+            }
+
+            if move_i >= args.skip {
+                // --- Compute best move (for timing) but don't use it ---
+                let start_time = Instant::now();
+                let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
+                // This call is primarily for timing and exercising the engine/TT logic.
+                // The engine's internal eprintln will still show computed best move info [cite: 117]
+                let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1, &mut immovable_vertexes); 
+                let think_time = start_time.elapsed();
+                total_think_time += think_time;
+                total_nodes += engine.last_nnodes();
+                pb.inc(1); // Increment progress bar
+            }
+            // ----------------------------------------------------------
+
+
+            // --- Generate legal moves and play a random one ---
+            let mut legal_moves = board.generate_moves(&mut immovable_vertexes); 
+            legal_moves.sort(); // Sort moves for consistent ordering
+
+            let chosen_action = if legal_moves.is_empty() {
+                pb.println("No legal moves available, playing Pass.");
+                Action::Pass // Play pass if no moves available
+            } else {
+                // Select a random move using the seeded RNG
+                *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
+            };
+            pb.println(format!("Playing move: {:?}", chosen_action));
+
+            // Apply the *randomly selected* move
+            board.do_action(chosen_action); 
         }
-
-        if move_i >= args.skip {
-            // --- Compute best move (for timing) but don't use it ---
-            let start_time = Instant::now();
-            let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
-            // This call is primarily for timing and exercising the engine/TT logic.
-            // The engine's internal eprintln will still show computed best move info [cite: 117]
-            let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1, &mut immovable_vertexes); 
-            let think_time = start_time.elapsed();
-            total_think_time += think_time;
-            total_nodes += engine.last_nnodes();
-            pb.inc(1); // Increment progress bar
-        }
-        // ----------------------------------------------------------
-
-
-        // --- Generate legal moves and play a random one ---
-        let mut legal_moves = board.generate_moves(&mut immovable_vertexes); 
-        legal_moves.sort(); // Sort moves for consistent ordering
-
-        let chosen_action = if legal_moves.is_empty() {
-             pb.println("No legal moves available, playing Pass.");
-            Action::Pass // Play pass if no moves available
-        } else {
-            // Select a random move using the seeded RNG
-            *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
-        };
-        pb.println(format!("Playing move: {:?}", chosen_action));
-
-        // Apply the *randomly selected* move
-        board.do_action(chosen_action); 
     }
 
     pb.finish_with_message("Simulation complete."); // Finish progress bar
 
-    println!("Total engine nodes: {}", total_nodes);
-    println!("Total engine think time: {:.3} seconds", total_think_time.as_secs_f64());
+    println!("Total number of runs {}", args.num_runs);
+    println!("Average engine nodes: {}", total_nodes / args.num_runs as u64);
+    println!("Average engine think time: {:.3} seconds", total_think_time.as_secs_f64() / args.num_runs as f64);
 }
