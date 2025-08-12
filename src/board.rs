@@ -58,6 +58,7 @@ pub struct Board {
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
 
+    pub height: [u8; GRID_SIZE],
     #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
 }
@@ -90,6 +91,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
+            height: [0; GRID_SIZE],
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
@@ -129,6 +131,7 @@ impl Board {
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
+            height: [0; GRID_SIZE],
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
@@ -143,7 +146,7 @@ impl Board {
     }
 
     pub fn occupied(&self, tile: Tile) -> bool {
-        self.tile(tile).is_some()
+        self.height[tile as usize] > 0
     }
 
     pub fn queen_required(&self) -> bool {
@@ -151,14 +154,11 @@ impl Board {
     }
 
     pub fn height(&self, tile: Tile) -> i32 {
-        if let Some(vec) = self.underworld.get(&tile) {
-            return (vec.len() + 1) as i32;
-        }
-        return (self.world[tile as usize] != Piece::empty()) as i32;
+        return self.height[tile as usize] as i32;
     } 
 
     pub fn is_stacked(&self, tile: Tile) -> bool {
-        self.height(tile) > 1
+        self.height[tile as usize] > 1
     }
 
     fn zobrist(&self, t: Tile, p: Piece, h: u32) -> u64 {
@@ -190,12 +190,16 @@ impl Board {
             self.queens[piece.color().index()] = Some(tile);
         }
 
+        self.height[tile as usize] += 1;
+
         self.zobrist_hash ^= self.zobrist(tile, piece, self.height(tile) as u32);
     }
 
     fn remove_piece(&mut self, tile: Tile) {
         
         self.zobrist_hash ^= self.zobrist(tile, self.world[tile as usize], self.height(tile) as u32);
+
+        self.height[tile as usize] -= 1;
 
         let curr = &mut self.world[tile as usize];
         debug_assert!(curr.is_some());

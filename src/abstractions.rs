@@ -60,4 +60,15 @@ impl ActionContainer {
 
 }
 
+pub struct OccupancyVec {
+    pub occupants: Vec<Tile>,
+}
+
+impl OccupancyVec {
+    pub fn new() -> Self {
+        OccupancyVec { 
+            occupants: Vec::new(),
+        }
+    }
+}
 
