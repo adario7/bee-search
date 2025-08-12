@@ -75,7 +75,9 @@ def load_results(results_file):
         return json.load(f)
 
 def get_positions_from_results(results_paths, engine):
-    positions = []
+    positions = set()
+    winners = {}
+    opp = {"white": "black", "black": "white"}
 
     for path in results_paths:
         print(f"Extracting positions from results in {path}...")
@@ -83,6 +85,7 @@ def get_positions_from_results(results_paths, engine):
 
         for result in tqdm(results):
             tmp = result["final_gamestate"].split(";")
+            winner = result["winner"]
 
             gametype = tmp[0]
             moves = tmp[3:]
@@ -97,13 +100,27 @@ def get_positions_from_results(results_paths, engine):
                 position = engine.receive(timeout=1)
                 if len(position) == 0:
                     raise TimeoutError("Engine didn't respond")
+                position = position[0]
+                if "invalidmove" in position:
+                    break
+                positions.add(position)
+                turn = position.split(";")[2].split("[")[0].lower()
+                relative = 1 if winner==turn else 0 if winner==opp[turn] else 0.5
+                if position not in winners: winners[position] = { 0: 0, 0.5: 0, 1: 0 }
+                winners[position][relative] += 1
 
-                positions.append(position[0])
-
-    positions = set(positions)
+    positions = list(positions)
     print(f"Extracted {len(positions)} positions.")
 
-    return positions
+    win_prob = {}
+    for position in positions:
+        wp, tot = 0, 0
+        for (w, n) in winners[position].items():
+            wp += w * n
+            tot += n
+        win_prob[position] = wp / tot
+
+    return positions, win_prob
 
 def get_graph_from_positions(positions, engine):
     graphs = []
@@ -252,12 +269,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     engine = Engine(args.engine)
-    positions = list(get_positions_from_results(args.results_paths, engine))
+    positions, win_prob = get_positions_from_results(args.results_paths, engine)
 
     current_engine_name = engine.name
 
     # Plan the evaluation run
     positions_to_eval, evals_map = plan_evaluation_run(positions, args.evals_path, args.depth, current_engine_name, args.reevaluate)
+
+    # update winners
+    for pos in positions:
+        if pos in evals_map:
+            evals_map[pos]["winner"] = win_prob[pos]
 
     # Run evaluation on the filtered list
     if positions_to_eval:
@@ -266,20 +288,15 @@ if __name__ == "__main__":
         processed = 0
         for i in range(0, len(positions_to_eval), chunk_size):
             chunk = positions_to_eval[i:i + chunk_size]
-            try:
-                evals = get_engine_eval(engine_path=args.engine, positions=chunk, depth=args.depth, timeout=args.timeout)
-                for e in evals:
-                    evals_map[e["position"]] = e
-                processed += len(chunk)
-                # Save after each chunk so we don't lose progress (including re-evaluations)
-                with open(args.evals_path, "w") as f:
-                    json.dump(list(evals_map.values()), f, indent=1)
-                print(f"Saved {len(evals_map)} evaluations to {args.evals_path} after processing {processed} positions")
-            except Exception:
-                # on exception, persist what we have and re-raise
-                with open(args.evals_path, "w") as f:
-                    json.dump(list(evals_map.values()), f, indent=1)
-                raise
+            evals = get_engine_eval(engine_path=args.engine, positions=chunk, depth=args.depth, timeout=args.timeout)
+            for e in evals:
+                evals_map[e["position"]] = e
+                e["winner"] = win_prob[e["position"]]
+            processed += len(chunk)
+            # Save after each chunk so we don't lose progress (including re-evaluations)
+            with open(args.evals_path, "w") as f:
+                json.dump(list(evals_map.values()), f, indent=1)
+            print(f"Saved {len(evals_map)} evaluations to {args.evals_path} after processing {processed} positions")
     else:
         print("No new positions to evaluate.")
 
