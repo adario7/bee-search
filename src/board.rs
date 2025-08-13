@@ -45,7 +45,7 @@ pub struct Board {
     // position of the queens
     pub queens: [Option<Tile>; 2],
     // list of occupied tiles for each player
-    pub occupied_tiles: [Vec<Tile>; 2],
+    pub occupied_tiles: [OccupancyVec; 2],
     // number of plies played
     pub turn_num: usize,
     // turn history
@@ -84,7 +84,7 @@ impl Board {
             underworld: HashMap::new(),
             placeable: [TOT_QTY, TOT_QTY],
             queens: [None, None],
-            occupied_tiles: [Vec::new(), Vec::new()],
+            occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileSet::new(), TileSet::new()],
@@ -124,7 +124,7 @@ impl Board {
             underworld: HashMap::new(),
             placeable: [[1, 3, 2, 3, 2, m, l, p], [1, 3, 2, 3, 2, m, l, p]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
-            occupied_tiles: [Vec::new(), Vec::new()],
+            occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileSet::new(), TileSet::new()],
@@ -154,7 +154,7 @@ impl Board {
     }
 
     pub fn height(&self, tile: Tile) -> i32 {
-        return self.height[tile as usize] as i32;
+        self.height[tile as usize] as i32
     } 
 
     pub fn is_stacked(&self, tile: Tile) -> bool {
@@ -166,16 +166,16 @@ impl Board {
         hash.rotate_left((h<<3) | (p.ptype() as u32))
     }
 
-    fn add_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
+    fn add_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
         if !vec.contains(&t) {
             vec.push(t);
         }
     }
 
-    fn remove_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
+    fn remove_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
-        vec.swap_remove(vec.iter().position(|&x| x == t).unwrap());
+        vec.remove(t);
     }
 
     fn add_piece(&mut self, tile: Tile, piece: Piece) {

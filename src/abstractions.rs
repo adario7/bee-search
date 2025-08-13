@@ -20,6 +20,10 @@ impl TileSet {
         self.table[tile as usize & TILESET_MASK] |= 1 << (tile as u32 >> TILESET_SHIFT);
     }
 
+    pub(crate) fn rem(&mut self, tile: Tile) {
+        self.table[tile as usize & TILESET_MASK] &= !(1 << (tile as u32 >> TILESET_SHIFT));
+    }
+
     pub(crate) fn get(&self, tile: Tile) -> bool {
         (self.table[tile as usize & TILESET_MASK] >> (tile as u32 >> TILESET_SHIFT)) & 1 != 0
     }
@@ -60,15 +64,45 @@ impl ActionContainer {
 
 }
 
+#[derive(Clone)]
 pub struct OccupancyVec {
     pub occupants: Vec<Tile>,
+    pub occupants_set: TileSet,
 }
 
 impl OccupancyVec {
     pub fn new() -> Self {
         OccupancyVec { 
             occupants: Vec::new(),
+            occupants_set: TileSet::new(),
         }
     }
+
+    pub fn contains(&self, tile: &Tile) -> bool {
+        return self.occupants_set.get(*tile);
+    }
+
+    pub fn push(&mut self, tile: Tile) {
+        self.occupants_set.set(tile);
+        self.occupants.push(tile);
+    }
+
+    pub fn remove(&mut self, tile: Tile) {
+        self.occupants_set.rem(tile);
+        self.occupants.swap_remove(self.occupants.iter().position(|&x| x == tile).unwrap());
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, u16> {
+        return self.occupants.iter();
+    }
+
+    pub fn first(&self) -> Option<&u16> {
+        return self.occupants.first();
+    }
+
+    pub fn len(&self) -> usize {
+        return self.occupants.len();
+    }
+
 }
 
