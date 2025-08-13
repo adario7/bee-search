@@ -35,6 +35,16 @@ fn check_bits(hash: u64) -> u32 {
     (hash >> 32) as u32
 }
 
+fn flag_score(flag: TTFlag) -> u8 {
+    match flag {
+        TTFlag::Null => 0,
+        TTFlag::OnlyEval => 1,
+        TTFlag::LowerBound => 2,
+        TTFlag::UpperBound => 2,
+        TTFlag::Exact => 3,
+    }
+}
+
 impl TTable {
     pub fn new(byte_size: usize) -> Self {
         let size = (byte_size / std::mem::size_of::<TEntry>()).next_power_of_two();
@@ -77,19 +87,24 @@ impl TTable {
         });
     }
 
-    pub fn put_entry(&self, idx: usize, entry: TEntry) {
+    pub fn put_entry(&self, idx: usize, mut entry: TEntry) {
         let slot = unsafe { &mut *self.buf[idx].get() };
-        // on collision always keep the new data, to prevent stale entries from living too long
-        // if there is no collising keep the deepest entry
+        let curr = *slot; // local copy to ease race conditions
+        let collision = curr.hash != entry.hash;
+        // overwrite on collisions, if we got a deeper entry, or if we get better information
         // use >= instead of > to prefer frasher entries in case of a reasearch
-        let collision = slot.hash != entry.hash;
-        // overwrite on collisions, at the root node, or if we got a deeper entry
-        if collision || entry.depth >= slot.depth {
-            let prev_eval = slot.eval;
-            *slot = entry;
-            if !collision && entry.eval.is_none() && prev_eval.is_some() { // don't forget the eval!
-                slot.eval = prev_eval;
+        if collision || entry.depth > curr.depth || (entry.depth == curr.depth && flag_score(entry.flag) >= flag_score(curr.flag)) {
+            // improve the entry if possible
+            if entry.depth == curr.depth && entry.flag == TTFlag::LowerBound && curr.flag == TTFlag::LowerBound {
+                entry.value = entry.value.max(curr.value);
             }
+            if entry.depth == curr.depth && entry.flag == TTFlag::UpperBound && curr.flag == TTFlag::UpperBound {
+                entry.value = entry.value.min(curr.value);
+            }
+            if entry.eval.is_none() && curr.eval.is_some() {
+                entry.eval = curr.eval;
+            }
+            *slot = entry;
         }
     }
 
