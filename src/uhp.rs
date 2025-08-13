@@ -73,7 +73,6 @@ impl Uhp {
 
     fn play(&mut self, args: &str) -> UhpResult<()> {
         let m = self.board.parse_action(args)?;
-        let mut immovable_vertexes = CutVertexes::new();
         if !self.board.is_legal(m, &mut immovable_vertexes) {
             return Err(UhpError::InvalidMove(args.to_string()));
         }
@@ -105,7 +104,6 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let mut immovable_vertexes = CutVertexes::new();
         let (_, m) = self.engine.clone().best_move(&self.board, depth, time, self.num_threads, &mut immovable_vertexes);
         println!("{}", self.board.action_to_string(m));
         Ok(())
@@ -172,7 +170,6 @@ impl Uhp {
     }
 
     fn eval(&mut self, args: &str) -> UhpResult<()> {
-        let mut immovable_vertexes = CutVertexes::new();
         let depth = args.parse::<u8>().unwrap_or(0);
         let score = if depth == 0 {
             self.board.static_eval(&mut immovable_vertexes)
@@ -226,14 +223,12 @@ impl Uhp {
     }
 
     fn features(&mut self) -> UhpResult<()> {
-        let mut immovable_vertexes = CutVertexes::new();
         let f = self.board.features(&mut immovable_vertexes);
         println!("{}", f.iter().map(|&x| x.to_string()).collect::<Vec<_>>().join(";"));
         Ok(())
     }
 
     fn static_eval(&mut self) -> UhpResult<()> {
-        let mut immovable_vertexes = CutVertexes::new();
         let score = self.board.static_eval(&mut immovable_vertexes);
         println!("{}", score);
         Ok(())

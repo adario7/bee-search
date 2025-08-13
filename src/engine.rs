@@ -484,7 +484,6 @@ impl Engine {
                 let th_engine = self.clone();
                 let th_abort = abort.clone();
                 let th_compl = compl.clone();
-                let mut immovable_vertexes_copy = immovable_vertexes.clone();
                 scope.spawn(move |_| {
                     let mut td = ThreadData {
                         id: i,

@@ -396,8 +396,6 @@ mod test {
 
         let mut b1 = Board::new();
         let mut b2 = Board::new();
-        let mut immovable_vertexes1 = CutVertexes::new();
-        let mut immovable_vertexes2 = CutVertexes::new();
 
         
         let depth = 50;

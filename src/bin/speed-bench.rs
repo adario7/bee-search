@@ -59,7 +59,6 @@ fn main() {
     if args.movegen_test {
 
         let mut board ;
-        let mut immovable_vertexes = CutVertexes::new();
         for _game in 0..args.n {
             board = Board::new();
 
@@ -99,7 +98,6 @@ fn main() {
     // Should still work well with random seeding 
     for run_id in 0..args.num_runs { 
         let mut board = Board::new();
-        let mut immovable_vertexes = CutVertexes::new();
         println!("Simulating run: {}", run_id);
         pb.reset();
         for move_i in 0..(args.skip + args.n) {

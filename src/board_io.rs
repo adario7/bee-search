@@ -166,7 +166,6 @@ impl Board {
     }
 
     pub fn legal_moves_string(&mut self) -> String {
-        let mut immovable_vertexes = CutVertexes::new();
         self.generate_moves(&mut immovable_vertexes)
             .iter().map(|&m| self.action_to_string(m))
             .collect::<Vec<_>>().join(";")

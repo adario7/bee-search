@@ -43,7 +43,6 @@ fn main() {
     run_command(&mut writer, &mut reader, "newgame Base+MLP");
 
     let mut board = Board::new();
-    let mut immovable_vertexes = CutVertexes::new();
 
     loop {
         if board.game_result() != GameResult::InProgress {
@@ -76,7 +75,6 @@ fn main() {
 }
 
 fn find_mismatch(board: &mut Board, writer: &mut impl Write, reader: &mut impl BufRead, depth: usize) {
-    let mut immovable_vertexes = CutVertexes::new();
     if depth == 1 {
         let my_moves = board.generate_moves(&mut immovable_vertexes).into_iter().map(|m| board.action_to_string(m)).collect::<Vec<_>>();
         let their_output = run_command(writer, reader, "validmoves");
