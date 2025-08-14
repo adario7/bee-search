@@ -8,6 +8,9 @@ use crate::eval::FEATURES_EVAL;
 use crate::movegen::CutVertexes;
 use crate::perft;
 
+const FORCE_ST: bool = false;
+const MAX_THREADS: usize = if FORCE_ST { 1 } else { 32 };
+
 pub struct Uhp {
     board: Board,
     engine: Arc<Engine>,
@@ -42,7 +45,7 @@ impl Uhp {
         Uhp {
             board: Board::new(),
             engine: Arc::new(Engine::new()),
-            num_threads: n
+            num_threads: n.min(MAX_THREADS)
         }
     }
 
@@ -54,12 +57,9 @@ impl Uhp {
         {
             print!("-GNN");
         }
-        if FEATURES_EVAL {
-            print!("-F");
-        }
-        if cfg!(debug_assertions) {
-            print!("-DEBUG");
-        }
+        if FEATURES_EVAL { print!("-F"); }
+        if FORCE_ST { print!("-ST"); }
+        if cfg!(debug_assertions) { print!("-DEBUG"); }
         println!();
         println!("Mosquito;Ladybug;Pillbug");
         Ok(())
@@ -100,6 +100,8 @@ impl Uhp {
             (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
             let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
+            // safety margin
+            let time = time - Duration::from_millis((2.0 + 2.7*(self.num_threads as f64).sqrt()).round() as u64);
             (30, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
@@ -126,7 +128,7 @@ impl Uhp {
     }
 
     fn print_options(&mut self) {
-        println!("NumThreads;int;{};32;1;32", self.num_threads);
+        println!("NumThreads;int;{};{};1;{}", self.num_threads, num_cpus::get(), MAX_THREADS);
     }
 
     fn get_option(&mut self, option: &str) -> UhpResult<()> {
@@ -140,7 +142,7 @@ impl Uhp {
     fn set_option(&mut self, option: &str, value: &str) -> UhpResult<()> {
         if option == "NumThreads" {
             let value = value.parse::<usize>().map_err(|_| UhpError::SyntaxError(value.into()))?;
-            if value > 0 && value <= 32 {
+            if value > 0 && value <= MAX_THREADS {
                 self.num_threads = value;
                 self.print_options();
                 return Ok(());

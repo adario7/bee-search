@@ -38,7 +38,7 @@ class HiveGNN(nn.Module):
                     self.gnn_layers.append(GATConv(in_dim, hidden_dim, heads=heads, concat=True, dropout=dropout))
                     out_dim = hidden_dim * heads
             else:
-                self.gnn_layers.append(GCNConv(in_dim, hidden_dim))
+                self.gnn_layers.append(GCNConv(in_dim, hidden_dim, improved=True, normalize=True))
                 out_dim = hidden_dim
 
             # projection to match residual dimension: maps previous feature dim -> out_dim
@@ -61,7 +61,7 @@ class HiveGNN(nn.Module):
             nn.Linear(hidden_dim, 32),
             nn.LeakyReLU(),
             nn.Dropout(dropout),
-            nn.Linear(32, 1)
+            nn.Linear(32, 2)
         )
 
     def forward(self, x, edge_index, batch=None):
@@ -81,8 +81,11 @@ class HiveGNN(nn.Module):
             max_pool = global_max_pool(x, batch)
 
         global_repr = torch.cat([mean_pool, max_pool], dim=-1)
-        evaluation = self.mlp_head(global_repr)
-        return evaluation * CLIP
+        y = self.mlp_head(global_repr)
+        evaluation, winner = y.split(1, dim=-1)
+        evaluation = evaluation * CLIP
+        winner = torch.sigmoid(winner)
+        return torch.cat([evaluation, winner], dim=-1)
 
 
 def create_node_features(board_state, device):
@@ -123,11 +126,6 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False, static
     print(f"Loaded {len(graph_dict)} graphs.")
     data_list = []
 
-    if static_train:
-        from arena import Engine
-        evals = tqdm(evals, desc="Loading static evaluations")
-        engine = Engine(NORMAL_MODEL_PATH)
-
     for eval in evals[:]:
         position = eval["position"]
         graph = graph_dict.get(position)
@@ -142,10 +140,11 @@ def load_training_data(evals_path, graphs_path, device, dumb_train=False, static
             else:
                 evaluation = eval["evaluation"]
             evaluation = np.clip(evaluation, -CLIP, CLIP)
+            winner = eval["winner"]
             data_list.append(Data(
-                x=create_node_features(features, device),
-                edge_index=create_adjacency_matrix(edges, device),
-                y=torch.tensor([evaluation], dtype=torch.float32, device=device)
+                x=create_node_features(features, None),
+                edge_index=create_adjacency_matrix(edges, None),
+                y=torch.tensor([evaluation, winner], dtype=torch.float32, device=None).unsqueeze(0)
             ))
     print(f"Loaded {len(data_list)} samples")
     return data_list
@@ -156,53 +155,85 @@ def load_from_pth(model, model_path, device='cuda'):
     model.eval()
     return model
 
-def train_model(model, train_loader, val_loader, num_epochs=100, lr=0.001, device='cuda', export_folder='./'):
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
-    criterion = nn.MSELoss()
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
-    patience_counter = 0
+
+def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, lam=0.2, device='cuda', export_folder='./'):
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=10, factor=0.5)
+    regr_lf = nn.MSELoss()
+    cls_lf = nn.BCELoss()
+    train_losses, val_losses = [], []
+    best_val = float('inf')
     patience = 20
+    pat_cnt = 0
     model.to(device)
+    lam = (CLIP*lam)**2 # match the scale of MSE
+
     for epoch in range(num_epochs):
         model.train()
-        train_loss = train_mae = 0
+        train_sum = train_regr = train_clf = train_mae = correct = n = 0
         for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}'):
             batch = batch.to(device)
-            optimizer.zero_grad()
+            opt.zero_grad()
             out = model(batch.x, batch.edge_index, batch.batch)
-            loss = criterion(out.squeeze(), batch.y)
+            eval_pred = out[:, 0].squeeze()
+            win_pred = out[:, 1].squeeze()                # already sigmoid in forward
+            y_regr = batch.y[:, 0].float()
+            y_clf  = batch.y[:, 1].float()
+            loss_regr = regr_lf(eval_pred, y_regr)
+            loss_clf = cls_lf(win_pred, y_clf)
+            loss = loss_regr + lam * loss_clf
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            train_loss += loss.item()
-            train_mae += F.l1_loss(out.squeeze(), batch.y).item()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+            bsz = y_regr.size(0)
+            train_sum += loss.item() * bsz
+            train_regr += loss_regr.item() * bsz
+            train_clf += loss_clf.item() * bsz
+            train_mae += F.l1_loss(eval_pred, y_regr, reduction='sum').item()
+            correct += ((win_pred > 0.5).long() == (y_clf > 0.5).long()).sum().item()
+            n += bsz
+
         model.eval()
-        val_loss = val_mae = 0
+        val_sum = val_regr = val_clf = val_mae = val_correct = val_n = 0
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
                 out = model(batch.x, batch.edge_index, batch.batch)
-                loss = criterion(out.squeeze(), batch.y)
-                val_loss += loss.item()
-                val_mae += F.l1_loss(out.squeeze(), batch.y).item()
-        avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        print(f'Epoch {epoch+1:3d}: Train Loss: {avg_train_loss:.4f}, Train MAE: {train_mae/len(train_loader):.2f}, Val Loss: {avg_val_loss:.4f}, Val MAE: {val_mae/len(val_loader):.2f}')
-        scheduler.step(avg_val_loss)
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+                eval_pred = out[:, 0].squeeze()
+                win_pred = out[:, 1].squeeze()
+                y_regr = batch.y[:, 0].float()
+                y_clf  = batch.y[:, 1].float()
+                loss_regr = regr_lf(eval_pred, y_regr)
+                loss_clf = cls_lf(win_pred, y_clf)
+                loss = loss_regr + lam * loss_clf
+
+                bsz = y_regr.size(0)
+                val_sum += loss.item() * bsz
+                val_regr += loss_regr.item() * bsz
+                val_clf += loss_clf.item() * bsz
+                val_mae += F.l1_loss(eval_pred, y_regr, reduction='sum').item()
+                val_correct += ((win_pred > 0.5).long() == (y_clf > 0.5).long()).sum().item()
+                val_n += bsz
+
+        avg_train = train_sum / n
+        avg_val = val_sum / val_n
+        train_losses.append(avg_train)
+        val_losses.append(avg_val)
+        print(f'Epoch {epoch+1:3d}: Train {avg_train:.4f} (regr {train_regr/n:.4f}, clf {train_clf/n:.4f}) MAE {train_mae/n:.4f} Acc {correct/n:.4f} | Val {avg_val:.4f} (regr {val_regr/val_n:.4f}, clf {val_clf/val_n:.4f}) MAE {val_mae/val_n:.4f} Acc {val_correct/val_n:.4f}')
+
+        sched.step(avg_val)
+        if avg_val < best_val:
+            best_val = avg_val
+            os.makedirs(export_folder, exist_ok=True)
             torch.save(model.state_dict(), os.path.join(export_folder, 'best_hive_gnn.pth'))
-            patience_counter = 0
+            pat_cnt = 0
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
+            pat_cnt += 1
+            if pat_cnt >= patience:
                 print(f'Early stopping at epoch {epoch+1}')
                 break
+
     return train_losses, val_losses
 
 def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
@@ -226,7 +257,7 @@ def export_to_onnx(model, sample_data, onnx_path='hive_gnn.onnx'):
 
 
 def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, use_gat=False, model_path=None, device=None, dumb_train=False, static_train=False,
-            hidden_dim=64, num_gnn_layers=3, dropout=0.2, export_folder='./'):
+            hidden_dim=64, num_gnn_layers=3, dropout=0.2, lam=0.2, export_folder='./'):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -235,7 +266,8 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
     model = HiveGNN(input_dim=12, hidden_dim=hidden_dim, num_gnn_layers=num_gnn_layers, dropout=dropout, use_gat=use_gat)
-    print("Using GAT model (requires ONNX opset 16+)")
+    if use_gat:
+        print("Using GAT model (requires ONNX opset 16+)")
     if model_path:
         model = load_from_pth(model, model_path, device=device)
         print(f"Loaded model from {model_path}")
@@ -245,7 +277,7 @@ def trainer(evals_path, graphs_path, num_epochs=100, lr=0.001, batch_size=32, us
     print(f"Total parameters: {total:,} | Trainable: {trainable:,} | Non-trainable: {total-trainable:,}")
 
     print("Starting training...")
-    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=num_epochs, lr=lr, device=device, export_folder=export_folder)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=num_epochs, lr=lr, lam=lam, device=device, export_folder=export_folder)
     model.load_state_dict(torch.load(os.path.join(export_folder, 'best_hive_gnn.pth')))
     if data_list:
         export_to_onnx(model, data_list[0], onnx_path=os.path.join(export_folder, 'hive_gnn.onnx'))
@@ -291,8 +323,10 @@ if __name__ == "__main__":
                         help='Hidden dimension for the GNN model.')
     parser.add_argument('--num-gnn-layers', type=int, default=3,
                         help='Number of GNN layers in the model.')
-    parser.add_argument('--dropout', type=float, default=0.2,
+    parser.add_argument('--dropout', type=float, default=0.3,
                         help='Dropout rate for the GNN model.')
+    parser.add_argument('--lam', type=float, default=0.2,
+                        help='Regularization parameter for the BCE loss.')
     args = parser.parse_args()
 
     # Log arguments
@@ -300,6 +334,6 @@ if __name__ == "__main__":
 
 
     trainer(evals_path=args.evals_path, graphs_path=args.graphs_path, num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size, use_gat=args.use_gat, model_path=args.load_from_pth,
-            dumb_train=args.dumb_train, static_train=args.static_train, hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout,
+            dumb_train=args.dumb_train, static_train=args.static_train, hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers, dropout=args.dropout, lam=args.lam,
             export_folder=args.export_folder)
     print("Done!")

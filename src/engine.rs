@@ -14,12 +14,23 @@ fn mated_in(ply: Depth) -> Eval {
     -mate_in(ply)
 }
 
+fn display_eval(e: Eval) -> String {
+    if e > WIN {
+        format!("+#{}", WIN + 99 - e)
+    } else if e < -WIN {
+        format!("-#{}", e + WIN + 99)
+    } else {
+        format!("{:+}", e)
+    }
+}
+
 pub struct Engine {
     tt: TTable,
     nnodes: AtomicU64,
     qsnodes: AtomicU64,
     // LMR table
     reductions: Vec<f32>,
+    move_votes: Vec<AtomicU64>,
 }
 
 pub struct ThreadData {
@@ -30,6 +41,8 @@ pub struct ThreadData {
     deadline: Instant,
     history_h: Vec<i64>,
     countermove: Vec<Action>,
+    local_nodes: u64,
+    last_vote: Option<(Action, u64)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,11 +76,21 @@ impl Engine {
         let reductions = (0..1024).map(|i| if i == 0 { 0.0 } else {
             0.68 * (i as f32).ln()
         }).collect();
+        let move_votes = (0..(GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1).map(|_| AtomicU64::new(0)).collect();
         Self {
             nnodes: AtomicU64::new(0),
             qsnodes: AtomicU64::new(0),
             tt: TTable::new(1 << 28), // TODO: make this configurable
-            reductions
+            reductions,
+            move_votes
+        }
+    }
+
+    fn vote_index(mv: Action) -> usize {
+        match mv {
+            Action::Place(pct, to) => to as usize * (GRID_SIZE + PCT_COUNT) + GRID_SIZE + pct as usize,
+            Action::Move(from, to) => to as usize * (GRID_SIZE + PCT_COUNT) + from as usize,
+            Action::Pass => (GRID_SIZE + PCT_COUNT) * GRID_SIZE
         }
     }
 
@@ -222,6 +245,7 @@ impl Engine {
         }
         self.nnodes.fetch_add(1, atomic::Ordering::Relaxed);
         self.qsnodes.fetch_add(1, atomic::Ordering::Relaxed);
+        td.local_nodes += 1;
 
         // terminal poisiton case
         let terminal_score = self.terminal_score(&td.board, ply);
@@ -291,11 +315,13 @@ impl Engine {
 
     fn minimax(&self, td: &mut ThreadData, ply: Depth, depth: Depth, mut alpha: Value, mut beta: Value, killers: &mut KillerT, immovable_vertexes: &mut CutVertexes) -> Option<Value> {
         let initial_hash = td.board.zobrist_hash;
+        let (window_a, window_b) = (alpha, beta);
         // out of time case
         if Instant::now() > td.deadline || td.abort.load(atomic::Ordering::Relaxed) {
             return None;
         }
         self.nnodes.fetch_add(1, atomic::Ordering::Relaxed);
+        td.local_nodes += 1;
 
         // depth cutoff case
         if depth == 0 {
@@ -412,6 +438,20 @@ impl Engine {
             self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, None, depth);
         }
 
+        // cast vote on the best move
+        if ply == 0 && alpha > window_a && alpha < window_b {
+            if let Some((mv, cnt)) = td.last_vote {
+                self.move_votes[Self::vote_index(mv)].fetch_sub(cnt, atomic::Ordering::Relaxed);
+            }
+            td.last_vote = if let Some((_, mvi)) = best_move {
+                let (mv, cnt) = (mvi.mv, (depth as f64 * (td.local_nodes as f64).sqrt()).round() as u64);
+                self.move_votes[Self::vote_index(mv)].fetch_add(cnt, atomic::Ordering::Relaxed);
+                Some((mv, cnt))
+            } else {
+                None
+            };
+        }
+
         debug_assert!(td.board.zobrist_hash == initial_hash);
         Some(alpha)
     }
@@ -460,7 +500,7 @@ impl Engine {
                             let score = score.unwrap();
                             let elapsed = start.elapsed();
                             let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
-                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, score, td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
+                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, display_eval(score), td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
                         } else {
                             eprintln!("[#{}] depth {}: could not find matching tt entry", td.id, depth);
                         }
@@ -476,6 +516,12 @@ impl Engine {
 
     fn lazy_smp(self: Arc<Self>, board: &Board, max_depth: Depth, deadline: Instant, num_threads: usize, immovable_vertexes: &mut CutVertexes) -> (Value, Action) {
         self.tt.clear_one(board.zobrist_hash); // make sure the root TT slot is available
+
+        // reset move votes
+        let root_moves = board.generate_moves(immovable_vertexes);
+        for &mv in &root_moves {
+            self.move_votes[Self::vote_index(mv)].store(0, atomic::Ordering::Relaxed);
+        }
     
         thread::scope(|scope| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -493,6 +539,8 @@ impl Engine {
                         deadline,
                         history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
                         countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                        local_nodes: 0,
+                        last_vote: None,
                     };
                     th_engine.iterative_deepening(&mut td, max_depth, &mut immovable_vertexes_copy);
                 });
@@ -500,16 +548,23 @@ impl Engine {
         })
         .unwrap();
 
-        let option = self.tt.get(board.zobrist_hash);
-        if let Some(entry) = option {
-            if board.is_legal(entry.pv, immovable_vertexes) {
-                return (entry.value, entry.pv);
-            }
-            eprintln!("root tt entry is not legal");
-        } else {
-            eprintln!("could not find matching tt entry");
+        let value = self.tt.get(board.zobrist_hash)
+            .map(|e| e.value)
+            .unwrap_or(0);
+        let mut root_votes: Vec<_> = root_moves.into_iter()
+            .map(|m| (m, self.move_votes[Self::vote_index(m)].load(atomic::Ordering::Relaxed)))
+            .collect();
+        root_votes.sort_by_key(|(_, cnt)| -(*cnt as i64));
+        let tot_votes = root_votes.iter().map(|(_, cnt)| *cnt).sum::<u64>();
+        eprint!("Votes: ");
+        for &(mv, cnt) in &root_votes {
+            if cnt == 0 { continue; }
+            let pct = 100.0 * cnt as f64 / tot_votes as f64;
+            eprint!("{}={:.1}% ", board.action_to_string(mv), pct);
         }
-        (0, *board.generate_moves(immovable_vertexes).first().unwrap_or(&Action::Pass))
+        eprintln!();
+        let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::Pass);
+        (value, best_move)
     }
 
     pub fn best_move(self: Arc<Self>, board: &Board, max_depth: Depth, max_time: Duration, num_threads: usize, immovable_vertexes: &mut CutVertexes) -> (Value, Action) {
@@ -521,7 +576,7 @@ impl Engine {
         let elapsed = start.elapsed().as_secs_f64();
         let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
         let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);
-        eprintln!("[{} th] explored {} nodes in {:.2}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
+        eprintln!("[{} th] explored {} nodes in {:.4}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
         r
     }
 
