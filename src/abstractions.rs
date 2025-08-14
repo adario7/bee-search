@@ -110,41 +110,6 @@ where
         self.cached_hash = Some(current_hash);
         new_result
     }
-
-    pub fn get_if_valid(&self, current_hash: CacheHash) -> Option<&T> {
-        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
-            if *cached_hash == current_hash {
-                return Some(cached_result);
-            }
-        }
-        None
-    }
-
-    pub fn update(&mut self, current_hash: CacheHash, value: T) {
-        self.cached_result = Some(value);
-        self.cached_hash = Some(current_hash);
-    }
-
-    pub fn invalidate(&mut self) {
-        self.cached_result = None;
-        self.cached_hash = None;
-    }
-
-    pub fn is_valid(&self, current_hash: CacheHash) -> bool {
-        self.cached_hash.as_ref().map_or(false, |hash| *hash == current_hash)
-    }
-
-    pub fn has_cached_value(&self) -> bool {
-        self.cached_result.is_some()
-    }
 }
 
-impl<T> Default for CachedValue<T>
-where
-    T: Clone,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
