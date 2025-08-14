@@ -530,10 +530,11 @@ impl Engine {
                 let th_engine = self.clone();
                 let th_abort = abort.clone();
                 let th_compl = compl.clone();
+                let th_board = board.clone();
                 scope.spawn(move |_| {
                     let mut td = ThreadData {
                         id: i,
-                        board: board.clone(),
+                        board: th_board,
                         abort: th_abort,
                         completed_depth: th_compl,
                         deadline,

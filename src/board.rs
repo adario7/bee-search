@@ -134,7 +134,7 @@ impl Board {
             zobrist_history: Vec::new(),
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
-            immovable: RefCell::new(CachedValue::new()),
+            immovable: RefCell::new(CachedValue::new()), // TODO refcell is stinky
         }
     }
 

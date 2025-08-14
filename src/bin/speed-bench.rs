@@ -1,4 +1,3 @@
-use bee_search::movegen::CutVertexes;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::IndexedRandom;
