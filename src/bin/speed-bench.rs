@@ -70,11 +70,11 @@ fn main() {
 
                 let start_t = Instant::now();
                 for _ in 0..1000 {
-                    total_nodes += board.generate_moves_n(&mut immovable_vertexes) as u64;
+                    total_nodes += board.generate_moves_n() as u64;
                 }
                 total_think_time += Instant::now() - start_t;
 
-                let mut legal_moves = board.generate_moves(&mut immovable_vertexes); 
+                let mut legal_moves = board.generate_moves(); 
                 legal_moves.sort(); // Sort moves for consistent ordering
 
                 let chosen_action = if legal_moves.is_empty() {
@@ -113,7 +113,7 @@ fn main() {
                 let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
                 // This call is primarily for timing and exercising the engine/TT logic.
                 // The engine's internal eprintln will still show computed best move info [cite: 117]
-                let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1, &mut immovable_vertexes); 
+                let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1); 
                 let think_time = start_time.elapsed();
                 total_think_time += think_time;
                 total_nodes += engine.last_nnodes();
@@ -123,7 +123,7 @@ fn main() {
 
 
             // --- Generate legal moves and play a random one ---
-            let mut legal_moves = board.generate_moves(&mut immovable_vertexes); 
+            let mut legal_moves = board.generate_moves(); 
             legal_moves.sort(); // Sort moves for consistent ordering
 
             let chosen_action = if legal_moves.is_empty() {

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
@@ -5,7 +6,6 @@ use std::hash::Hasher;
 #[cfg(feature = "gnn")]
 use crate::graph_nn::GnnEvaluator;
 
-use crate::movegen::CutVertexes;
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
 use crate::piece_type::{Pct, PieceType};
@@ -60,6 +60,8 @@ pub struct Board {
 
     #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
+
+    pub immovable: RefCell<CachedValue<TileSet>>,
 }
 
 pub const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -92,6 +94,7 @@ impl Board {
             zobrist_history: Vec::new(),
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
+            immovable: RefCell::new(CachedValue::new()),
         }
     }
 
@@ -131,6 +134,7 @@ impl Board {
             zobrist_history: Vec::new(),
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
+            immovable: RefCell::new(CachedValue::new()),
         }
     }
 
@@ -231,8 +235,8 @@ impl Board {
     }
 
     /// very slow!
-    pub fn is_legal(&self, action: Action, immovable_vertexes: &mut CutVertexes) -> bool {
-        self.generate_moves(immovable_vertexes).contains(&action)
+    pub fn is_legal(&self, action: Action) -> bool {
+        self.generate_moves().contains(&action)
     }
 
     /// assumes the action is legal
@@ -310,6 +314,10 @@ impl Board {
     // a move is quiet if it does not attack the opponent's queen
     pub fn is_quiet(self: &Board, action: &Action) -> bool {
         !self.is_noisy(action)
+    }
+
+    pub fn get_cached_hash(&self) -> CacheHash {
+        CacheHash {zobrist_hash: self.zobrist_hash, board_color: self.color()}
     }
 }
 
@@ -413,7 +421,7 @@ mod test {
                     break;
                 }
 
-                let moves = b1.generate_moves(&mut immovable_vertexes1);
+                let moves = b1.generate_moves();
 
                 if moves.len() > 0 {
                     
@@ -460,14 +468,14 @@ mod test {
                     break;
                 }
 
-                let moves1 = b1.generate_moves(&mut immovable_vertexes1);
+                let moves1 = b1.generate_moves();
                 if moves1.len() > 0 {
                     let mov1 = rng.random_range(0..moves1.len());
                     b1.do_action(moves1[mov1]);
                 }else {
                     b1.do_action(Action::Pass);
                 }
-                let moves2 = b2.generate_moves(&mut immovable_vertexes2);
+                let moves2 = b2.generate_moves();
                 if moves2.len() > 0 {
                     let mov2 = rng.random_range(0..moves2.len());
                     b2.do_action(moves2[mov2]);

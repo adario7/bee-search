@@ -3,21 +3,6 @@ use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::Pct, tile
 
 const APPROX_MOVE_N: bool = true;
 
-#[derive(Clone)]
-pub struct CutVertexes {
-    pub cut_vertexes: TileSet,
-    pub zobrist_hash: u64,
-}
-
-impl CutVertexes {
-    pub fn new() -> Self {
-        CutVertexes {
-            cut_vertexes: TileSet::new(),
-            zobrist_hash: 1,
-        }
-    }
-}
-
 impl Board {
     fn generate_placements(&self, turns: &mut Vec<Action>) {
         let mut no_placement = TileSet::new();
@@ -86,11 +71,7 @@ impl Board {
     // Linear algorithm to find all cut vertexes.
     // Algorithm explanation: https://web.archive.org/web/20180830110222/https://www.eecs.wsu.edu/~holder/courses/CptS223/spr08/slides/graphapps.pdf
     // Example code: https://cp-algorithms.com/graph/cutpoints.html
-    pub(crate) fn find_cut_vertexes(&self, immovable_vertexes: &mut CutVertexes) -> TileSet {
-        if self.zobrist_hash == immovable_vertexes.zobrist_hash {
-            return immovable_vertexes.cut_vertexes.clone();
-        }
-        
+    pub(crate) fn find_cut_vertexes_uncached(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             visited: TileSet,
@@ -143,13 +124,15 @@ impl Board {
         let start = *self.occupied_tiles[self.color().index()].first().unwrap_or_else(
             || self.occupied_tiles[self.color().index()].first().unwrap_or(&TILE_ZERO));
         dfs(&mut state, start, start);
-        immovable_vertexes.zobrist_hash = self.zobrist_hash;
-        immovable_vertexes.cut_vertexes = state.immovable.clone();
         state.immovable
     }
 
-    /* 
     pub(crate) fn find_cut_vertexes(&self) -> TileSet {
+        self.immovable.borrow_mut().get_or_compute(self.get_cached_hash(), &self, Self::find_cut_vertexes_uncached)
+    }
+
+    /* 
+    pub(crate) fn find_cut_vertexes_uncached(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             immovable: TileSet,
@@ -651,8 +634,9 @@ impl Board {
         n
     }
 
-    pub(crate) fn generate_movements(&self, turns: &mut Vec<Action>, immovable_vertexes: &mut CutVertexes) {
-        let mut immovable = self.find_cut_vertexes(immovable_vertexes);
+    pub(crate) fn generate_movements(&self, turns: &mut Vec<Action>) {
+
+        let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
             _ => None,
@@ -744,7 +728,7 @@ impl Board {
     }
 
 
-    pub fn generate_moves(self: &Board, immovable_vertexes: &mut CutVertexes) -> Vec<Action> {
+    pub fn generate_moves(self: &Board) -> Vec<Action> {
         let mut turns: Vec<Action> = Vec::new();
         let remaining = self.placeable[self.color().index()];
         if self.turn_num < 2 {
@@ -771,7 +755,7 @@ impl Board {
         // Once queen has been placed, pieces may move.
         if remaining[Pct::Queen as usize] == 0 {
             // For movable pieces, generate all legal moves.
-            self.generate_movements(&mut turns, immovable_vertexes);
+            self.generate_movements(&mut turns);
         }
         if remaining.iter().any(|&num| num > 0) {
             // Find placeable positions.
@@ -827,8 +811,8 @@ impl Board {
         cc_size
     }
 
-    pub fn generate_movements_n(self: &Board, immovable_vertexes: &mut CutVertexes) -> usize {
-        let mut immovable = self.find_cut_vertexes(immovable_vertexes);
+    pub fn generate_movements_n(self: &Board) -> usize {
+        let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
             _ => None,
@@ -898,9 +882,9 @@ impl Board {
         num
     }
 
-    pub fn generate_moves_n(self: &Board, immovable_vertexes: &mut CutVertexes) -> usize {
+    pub fn generate_moves_n(self: &Board) -> usize {
         if !APPROX_MOVE_N {
-            return self.generate_moves(immovable_vertexes).len();
+            return self.generate_moves().len();
         }
 
         let remaining = self.placeable[self.color().index()];
@@ -921,7 +905,7 @@ impl Board {
 
         if remaining[Pct::Queen as usize] == 0 {
             // For movable pieces, generate all legal moves.
-            n_moves += self.generate_movements_n(immovable_vertexes);
+            n_moves += self.generate_movements_n();
 
         }
         if remaining.iter().any(|&num| num > 0) {
@@ -935,12 +919,11 @@ impl Board {
 #[test]
 fn test_first_move(){
     let mut board = Board::new();
-    let mut immovable_vetexes = CutVertexes::new();
     
     board.do_action(Action::Place(TILE_ZERO, Pct::Ant));
     board.do_action(Action::Place(TILE_ZERO + Direction::E, Pct::Ant));
 
-    for action in board.generate_moves(&mut immovable_vetexes) {
+    for action in board.generate_moves() {
         println!("{:?}", action);
     }
 

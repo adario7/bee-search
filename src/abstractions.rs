@@ -1,5 +1,7 @@
+use crate::piece::Color;
+
 use crate::tile::{Tile, GRID_SIZE};
-use crate::board::Action;
+use crate::board::{Action, Board};
 use std::collections::HashSet;
 
 const TILESET_NUM_WORDS: usize = GRID_SIZE / 32;
@@ -22,6 +24,10 @@ impl TileSet {
 
     pub(crate) fn get(&self, tile: Tile) -> bool {
         (self.table[tile as usize & TILESET_MASK] >> (tile as u32 >> TILESET_SHIFT)) & 1 != 0
+    }
+
+    pub fn copy(&self) -> TileSet {
+        TileSet {table: self.table}
     }
 }
 
@@ -60,4 +66,85 @@ impl ActionContainer {
 
 }
 
+#[derive(Debug, Clone)]
+pub struct CacheHash {
+    pub zobrist_hash: u64,
+    pub board_color: Color,
+}
+
+impl PartialEq<CacheHash> for CacheHash {
+    fn eq(&self, other: &CacheHash) -> bool {
+        self.zobrist_hash == other.zobrist_hash && self.board_color == other.board_color
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedValue<T> {
+    cached_result: Option<T>,
+    cached_hash: Option<CacheHash>,
+}
+
+impl<T> CachedValue<T>
+where
+    T: Clone,
+{
+    pub fn new() -> Self {
+        Self {
+            cached_result: None,
+            cached_hash: None,
+        }
+    }
+
+    pub fn get_or_compute<F>(&mut self, current_hash: CacheHash, board: &Board, compute_fn: F) -> T
+    where
+        F: FnOnce(&Board) -> T,
+    {
+        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
+            if *cached_hash == current_hash {
+                return cached_result.clone();
+            }
+        }
+
+        let new_result = compute_fn(board);
+        self.cached_result = Some(new_result.clone());
+        self.cached_hash = Some(current_hash);
+        new_result
+    }
+
+    pub fn get_if_valid(&self, current_hash: CacheHash) -> Option<&T> {
+        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
+            if *cached_hash == current_hash {
+                return Some(cached_result);
+            }
+        }
+        None
+    }
+
+    pub fn update(&mut self, current_hash: CacheHash, value: T) {
+        self.cached_result = Some(value);
+        self.cached_hash = Some(current_hash);
+    }
+
+    pub fn invalidate(&mut self) {
+        self.cached_result = None;
+        self.cached_hash = None;
+    }
+
+    pub fn is_valid(&self, current_hash: CacheHash) -> bool {
+        self.cached_hash.as_ref().map_or(false, |hash| *hash == current_hash)
+    }
+
+    pub fn has_cached_value(&self) -> bool {
+        self.cached_result.is_some()
+    }
+}
+
+impl<T> Default for CachedValue<T>
+where
+    T: Clone,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
 

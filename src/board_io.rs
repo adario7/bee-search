@@ -1,4 +1,3 @@
-use crate::movegen::CutVertexes;
 use crate::uhp::{UhpError, UhpResult};
 use crate::tile::{Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::piece_type::{Pct, PieceType};
@@ -166,7 +165,7 @@ impl Board {
     }
 
     pub fn legal_moves_string(&mut self) -> String {
-        self.generate_moves(&mut immovable_vertexes)
+        self.generate_moves()
             .iter().map(|&m| self.action_to_string(m))
             .collect::<Vec<_>>().join(";")
     }
@@ -266,10 +265,9 @@ impl Board {
         // turn string
         toks.next().ok_or_else(|| UhpError::InvalidGameString("missing turn string".to_owned()))?;
         // sequence of moves
-        let mut immovable_vetexes = CutVertexes::new();
         for move_string in toks {
             let m = board.parse_action(move_string)?;
-            if !board.is_legal(m, &mut immovable_vetexes) {
+            if !board.is_legal(m) {
                 return Err(UhpError::InvalidMove(move_string.to_owned()));
             }
             board.do_action(m);

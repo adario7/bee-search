@@ -5,7 +5,6 @@ use std::time::Duration;
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::eval::FEATURES_EVAL;
-use crate::movegen::CutVertexes;
 use crate::perft;
 
 const FORCE_ST: bool = false;
@@ -73,7 +72,7 @@ impl Uhp {
 
     fn play(&mut self, args: &str) -> UhpResult<()> {
         let m = self.board.parse_action(args)?;
-        if !self.board.is_legal(m, &mut immovable_vertexes) {
+        if !self.board.is_legal(m) {
             return Err(UhpError::InvalidMove(args.to_string()));
         }
         self.board.do_action(m); // TODO: check for illegal moves
@@ -106,7 +105,7 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let (_, m) = self.engine.clone().best_move(&self.board, depth, time, self.num_threads, &mut immovable_vertexes);
+        let (_, m) = self.engine.clone().best_move(&self.board, depth, time, self.num_threads);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -174,9 +173,9 @@ impl Uhp {
     fn eval(&mut self, args: &str) -> UhpResult<()> {
         let depth = args.parse::<u8>().unwrap_or(0);
         let score = if depth == 0 {
-            self.board.static_eval(&mut immovable_vertexes)
+            self.board.static_eval()
         } else {
-            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, &mut immovable_vertexes).0
+            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads).0
         };
         println!("{}", score);
         Ok(())
@@ -225,13 +224,13 @@ impl Uhp {
     }
 
     fn features(&mut self) -> UhpResult<()> {
-        let f = self.board.features(&mut immovable_vertexes);
+        let f = self.board.features();
         println!("{}", f.iter().map(|&x| x.to_string()).collect::<Vec<_>>().join(";"));
         Ok(())
     }
 
     fn static_eval(&mut self) -> UhpResult<()> {
-        let score = self.board.static_eval(&mut immovable_vertexes);
+        let score = self.board.static_eval();
         println!("{}", score);
         Ok(())
     }

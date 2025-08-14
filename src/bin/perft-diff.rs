@@ -62,7 +62,7 @@ fn main() {
         }
 
         // Play a random move
-        let moves = board.generate_moves(&mut immovable_vertexes);
+        let moves = board.generate_moves();
         let move_index = moves.len() * rng.random::<f64>() as usize;
         let m = moves[move_index];
         // Send the move to the engine
@@ -76,7 +76,7 @@ fn main() {
 
 fn find_mismatch(board: &mut Board, writer: &mut impl Write, reader: &mut impl BufRead, depth: usize) {
     if depth == 1 {
-        let my_moves = board.generate_moves(&mut immovable_vertexes).into_iter().map(|m| board.action_to_string(m)).collect::<Vec<_>>();
+        let my_moves = board.generate_moves().into_iter().map(|m| board.action_to_string(m)).collect::<Vec<_>>();
         let their_output = run_command(writer, reader, "validmoves");
         let their_moves = their_output.first().unwrap().split(';').map(|s| s.to_owned()).collect::<Vec<_>>();
         let my_set: HashSet<_> = my_moves.iter().collect();
@@ -93,7 +93,7 @@ fn find_mismatch(board: &mut Board, writer: &mut impl Write, reader: &mut impl B
         println!("Generated only by them: {:?}", only_in_theirs);
         return;
     }
-    let moves = board.generate_moves(&mut immovable_vertexes);
+    let moves = board.generate_moves();
     for &m in &moves {
         run_command(writer, reader, &format!("play {}", board.action_to_string(m)));
         board.do_action(m);
