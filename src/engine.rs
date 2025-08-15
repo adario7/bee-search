@@ -40,6 +40,13 @@ struct MoveInfo {
     hist: i64
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeType {
+    Pv,
+    All,
+    Cut,
+}
+
 const KILLER_N: usize = 2;
 type KillerT = [(Action, u8); KILLER_N];
 
@@ -182,20 +189,34 @@ impl Engine {
     }
 
     // principal variation search with LMR
-    fn pvs(&self, td: &mut ThreadData, ply: Depth, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, move_index: usize) -> Option<Value> {
+    fn pvs(&self, td: &mut ThreadData, nt: NodeType, ply: Depth, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, move_index: usize) -> Option<Value> {
         let nply = ply + 1;
         let ndepth = depth - 1;
+        let child_t = match (nt, move_index) {
+            (NodeType::Pv, 0) => NodeType::Pv,
+            (NodeType::Pv, _) => NodeType::Cut,
+            (NodeType::Cut, 0) => NodeType::All,
+            (NodeType::Cut, _) => NodeType::Cut,
+            (NodeType::All, _) => NodeType::Cut
+        };
         if move_index == 0 || depth < 2 {
             // search the first move with the full window
-            self.minimax(td, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
+            self.minimax(td, child_t, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
-            let r = self.reductions[move_index] * self.reductions[depth as usize] + 1.05;
-            let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).ceil() as Depth;
-            let mut score = -self.minimax(td, nply, d, -(alpha+1), -alpha, killers)?;
+            let r = 1.0
+                + self.reductions[move_index] * self.reductions[depth as usize]
+                + match nt { NodeType::Pv => -1.5, NodeType::Cut => 2.8, _ => 0.0  };
+            let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).round() as Depth;
+            let mut score = -self.minimax(td,  child_t, nply, d, -(alpha+1), -alpha, killers)?;
             // if the reduced null window search fails, search again with a full window
             if score > alpha && (beta > 1 + alpha || d < ndepth) {
-                score = -self.minimax(td, nply, ndepth, -beta, -alpha, killers)?;
+                let re_t = match nt {
+                    NodeType::Pv => NodeType::Pv,
+                    NodeType::All => NodeType::Cut,
+                    NodeType::Cut => NodeType::All
+                };
+                score = -self.minimax(td, re_t, nply, ndepth, -beta, -alpha, killers)?;
             }
             Some(score)
         }
@@ -289,7 +310,7 @@ impl Engine {
     }
 
 
-    fn minimax(&self, td: &mut ThreadData, ply: Depth, depth: Depth, mut alpha: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
+    fn minimax(&self, td: &mut ThreadData, nt: NodeType, ply: Depth, depth: Depth, mut alpha: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
         let initial_hash = td.board.zobrist_hash;
         // out of time case
         if Instant::now() > td.deadline || td.abort.load(atomic::Ordering::Relaxed) {
@@ -343,7 +364,7 @@ impl Engine {
         if depth >= 4 && pv.is_none() {
             const IIDR: Depth = 2;
             let r = IIDR + (depth - IIDR) / 3;
-            self.minimax(td, ply, depth - r, alpha, beta, killers);
+            self.minimax(td, nt, ply, depth - r, alpha, beta, killers);
             entry = self.tt.get(td.board.zobrist_hash);
             pv = entry.map(|e| e.pv);
         }
@@ -353,8 +374,7 @@ impl Engine {
         let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
 
         // razoring
-        let is_pv = beta > alpha + 1; // TODO: this is not completely correct
-        if !is_pv && depth <= 6 && eval < alpha - 500 - 200 * depth as Eval * depth as Eval {
+        if nt != NodeType::Pv && depth <= 6 && eval < alpha - 500 - 200 * depth as Eval * depth as Eval {
             return self.qsearch(td, ply, ply * 2, alpha, beta, killers)
         }
 
@@ -365,12 +385,12 @@ impl Engine {
 
         // null move pruning
         const NMR: Depth = 2;
-        if depth > NMR && ply > 0 {
+        if nt == NodeType::Cut && depth > NMR && eval >= beta + 50 {
             if eval >= beta {
                 let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
                 let pending = td.play_pending(Action::Pass);
-                let value = -self.minimax(pending.td, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
+                let value = -self.minimax(pending.td, NodeType::All, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
                 drop(pending);
                 if value >= beta {
                     return Some(self.fail_high(value, beta));
@@ -387,7 +407,7 @@ impl Engine {
         for (move_idx, mvi) in moves.iter().enumerate() {
             let mv = mvi.mv;
             let pending = td.play_pending(mv);
-            let opt = self.pvs(pending.td, ply, depth, alpha, beta, &mut child_klr, move_idx);
+            let opt = self.pvs(pending.td, nt, ply, depth, alpha, beta, &mut child_klr, move_idx);
             drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
@@ -427,7 +447,7 @@ impl Engine {
         let mut root_klr = Default::default();
         for i in 0..99 {
             let initial_hash = td.board.zobrist_hash;
-            let value = self.minimax(td, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
+            let value = self.minimax(td, NodeType::Pv, 0, depth, alpha as Value, beta as Value, &mut root_klr)?;
             debug_assert!(td.board.zobrist_hash == initial_hash);
             // when search fails, grow the window exponentially
             if value as i64 <= alpha {
