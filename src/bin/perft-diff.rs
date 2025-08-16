@@ -3,7 +3,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, usize};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
-use bee_search::movegen::CutVertexes;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use regex::Regex;

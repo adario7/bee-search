@@ -514,7 +514,7 @@ impl Engine {
         td.abort.store(true, atomic::Ordering::Relaxed);
     }
 
-    fn lazy_smp(self: Arc<Self>, board: &Board, max_depth: Depth, deadline: Instant, num_threads: usize) -> (Value, Action) {
+    fn lazy_smp(self: Arc<Self>, board: &mut Board, max_depth: Depth, deadline: Instant, num_threads: usize) -> (Value, Action) {
         self.tt.clear_one(board.zobrist_hash); // make sure the root TT slot is available
 
         // reset move votes
@@ -530,10 +530,11 @@ impl Engine {
                 let th_engine = self.clone();
                 let th_abort = abort.clone();
                 let th_compl = compl.clone();
+                let th_board = board.clone();
                 scope.spawn(move |_| {
                     let mut td = ThreadData {
                         id: i,
-                        board: board.clone(),
+                        board: th_board,
                         abort: th_abort,
                         completed_depth: th_compl,
                         deadline,
@@ -567,7 +568,7 @@ impl Engine {
         (value, best_move)
     }
 
-    pub fn best_move(self: Arc<Self>, board: &Board, max_depth: Depth, max_time: Duration, num_threads: usize) -> (Value, Action) {
+    pub fn best_move(self: Arc<Self>, board: &mut Board, max_depth: Depth, max_time: Duration, num_threads: usize) -> (Value, Action) {
         let start = Instant::now();
         self.nnodes.store(0, atomic::Ordering::Relaxed);
         self.qsnodes.store(0, atomic::Ordering::Relaxed);

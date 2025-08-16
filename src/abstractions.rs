@@ -95,7 +95,7 @@ where
         }
     }
 
-    pub fn get_or_compute<F>(&mut self, current_hash: CacheHash, board: &Board, compute_fn: F) -> T
+    pub fn get_or_compute<F>(&self, current_hash: CacheHash, board: &Board, compute_fn: F) -> T
     where
         F: FnOnce(&Board) -> T,
     {
@@ -105,11 +105,27 @@ where
             }
         }
 
-        let new_result = compute_fn(board);
-        self.cached_result = Some(new_result.clone());
-        self.cached_hash = Some(current_hash);
-        new_result
+        compute_fn(board)
     }
+
+    pub fn get_if_valid(&self, current_hash: CacheHash) -> Option<&T> {
+        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
+            if *cached_hash == current_hash {
+                return Some(cached_result);
+            }
+        }
+        None
+    }
+
+    pub fn update(&mut self, current_hash: CacheHash, value: T) {
+        self.cached_result = Some(value);
+        self.cached_hash = Some(current_hash);
+    }
+
+    pub fn is_valid(&self, current_hash: CacheHash) -> bool {
+        self.cached_hash.as_ref().map_or(false, |hash| *hash == current_hash)
+    }
+
 }
 
 

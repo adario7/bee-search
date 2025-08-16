@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
@@ -61,7 +60,7 @@ pub struct Board {
     #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
 
-    pub immovable: RefCell<CachedValue<TileSet>>,
+    pub immovable: CachedValue<TileSet>,
 }
 
 pub const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -94,7 +93,7 @@ impl Board {
             zobrist_history: Vec::new(),
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
-            immovable: RefCell::new(CachedValue::new()),
+            immovable: CachedValue::new(),
         }
     }
 
@@ -134,7 +133,7 @@ impl Board {
             zobrist_history: Vec::new(),
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
-            immovable: RefCell::new(CachedValue::new()),
+            immovable: CachedValue::new(),
         }
     }
 
@@ -235,7 +234,7 @@ impl Board {
     }
 
     /// very slow!
-    pub fn is_legal(&self, action: Action) -> bool {
+    pub fn is_legal(&mut self, action: Action) -> bool {
         self.generate_moves().contains(&action)
     }
 

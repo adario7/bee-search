@@ -71,7 +71,7 @@ impl Board {
     // Linear algorithm to find all cut vertexes.
     // Algorithm explanation: https://web.archive.org/web/20180830110222/https://www.eecs.wsu.edu/~holder/courses/CptS223/spr08/slides/graphapps.pdf
     // Example code: https://cp-algorithms.com/graph/cutpoints.html
-    pub(crate) fn find_cut_vertexes_uncached(&self) -> TileSet {
+    pub(crate) fn find_cut_vertexes_unmutable(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             visited: TileSet,
@@ -127,12 +127,8 @@ impl Board {
         state.immovable
     }
 
-    pub(crate) fn find_cut_vertexes(&self) -> TileSet {
-        self.immovable.borrow_mut().get_or_compute(self.get_cached_hash(), &self, Self::find_cut_vertexes_uncached)
-    }
-
     /* 
-    pub(crate) fn find_cut_vertexes_uncached(&self) -> TileSet {
+    pub(crate) fn find_cut_vertexes_unmutable(&self) -> TileSet {
         struct State<'a> {
             board: &'a Board,
             immovable: TileSet,
@@ -636,7 +632,7 @@ impl Board {
 
     pub(crate) fn generate_movements(&self, turns: &mut Vec<Action>) {
 
-        let mut immovable = self.find_cut_vertexes();
+        let mut immovable = self.immovable.get_or_compute(self.get_cached_hash(), &self, Self::find_cut_vertexes_unmutable);
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
             _ => None,
@@ -728,7 +724,7 @@ impl Board {
     }
 
 
-    pub fn generate_moves(self: &Board) -> Vec<Action> {
+    pub fn generate_moves_unmutable(self: &Board) -> Vec<Action> {
         let mut turns: Vec<Action> = Vec::new();
         let remaining = self.placeable[self.color().index()];
         if self.turn_num < 2 {
@@ -812,7 +808,7 @@ impl Board {
     }
 
     pub fn generate_movements_n(self: &Board) -> usize {
-        let mut immovable = self.find_cut_vertexes();
+        let mut immovable = self.immovable.get_or_compute(self.get_cached_hash(), &self, Self::find_cut_vertexes_unmutable);
         let stunned = match self.turn_history.last() {
             Some(Action::Move(_, dest)) => Some(dest),
             _ => None,
@@ -882,9 +878,9 @@ impl Board {
         num
     }
 
-    pub fn generate_moves_n(self: &Board) -> usize {
+    pub fn generate_moves_n_unmutable(self: &Board) -> usize {
         if !APPROX_MOVE_N {
-            return self.generate_moves().len();
+            return self.generate_moves_unmutable().len();
         }
 
         let remaining = self.placeable[self.color().index()];
@@ -912,6 +908,33 @@ impl Board {
             n_moves += self.generate_placements_n();
         }
         max(1,n_moves)
+    }
+}
+
+//mutable methods
+impl Board {
+    pub(crate) fn find_cut_vertexes(&mut self) -> TileSet {
+        if let Some(immovable) = self.immovable.get_if_valid(self.get_cached_hash()) {
+            return immovable.clone();
+        }
+
+        let immovable = self.find_cut_vertexes_unmutable();
+        self.immovable.update(self.get_cached_hash(), immovable.clone());
+        immovable
+    }
+
+    pub fn generate_moves(&mut self) -> Vec<Action> {
+        if !self.immovable.is_valid(self.get_cached_hash()) {
+            self.immovable.update(self.get_cached_hash(), self.find_cut_vertexes_unmutable());
+        }
+        self.generate_moves_unmutable()
+    }
+
+    pub fn generate_moves_n(&mut self) -> usize {
+        if !self.immovable.is_valid(self.get_cached_hash()) {
+            self.immovable.update(self.get_cached_hash(), self.find_cut_vertexes_unmutable());
+        }
+        self.generate_moves_n_unmutable()
     }
 }
 

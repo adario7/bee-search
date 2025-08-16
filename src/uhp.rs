@@ -105,7 +105,7 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let (_, m) = self.engine.clone().best_move(&self.board, depth, time, self.num_threads);
+        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
