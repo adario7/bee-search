@@ -44,7 +44,7 @@ pub struct Board {
     // position of the queens
     pub queens: [Option<Tile>; 2],
     // list of occupied tiles for each player
-    pub occupied_tiles: [Vec<Tile>; 2],
+    pub occupied_tiles: [OccupancyVec; 2],
     // number of plies played
     pub turn_num: usize,
     // turn history
@@ -57,6 +57,7 @@ pub struct Board {
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
 
+    pub height: [u8; GRID_SIZE],
     #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
 
@@ -84,13 +85,14 @@ impl Board {
             underworld: HashMap::new(),
             placeable: [TOT_QTY, TOT_QTY],
             queens: [None, None],
-            occupied_tiles: [Vec::new(), Vec::new()],
+            occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileSet::new(), TileSet::new()],
             zobrist_table,
             zobrist_hash: 1,
             zobrist_history: Vec::new(),
+            height: [0; GRID_SIZE],
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
             immovable: CachedValue::new(),
@@ -124,13 +126,14 @@ impl Board {
             underworld: HashMap::new(),
             placeable: [[1, 3, 2, 3, 2, m, l, p], [1, 3, 2, 3, 2, m, l, p]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
-            occupied_tiles: [Vec::new(), Vec::new()],
+            occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileSet::new(), TileSet::new()],
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
+            height: [0; GRID_SIZE],
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
             immovable: CachedValue::new(),
@@ -146,7 +149,7 @@ impl Board {
     }
 
     pub fn occupied(&self, tile: Tile) -> bool {
-        self.tile(tile).is_some()
+        self.height[tile as usize] > 0
     }
 
     pub fn queen_required(&self) -> bool {
@@ -154,14 +157,11 @@ impl Board {
     }
 
     pub fn height(&self, tile: Tile) -> i32 {
-        if let Some(vec) = self.underworld.get(&tile) {
-            return (vec.len() + 1) as i32;
-        }
-        return (self.world[tile as usize] != Piece::empty()) as i32;
+        self.height[tile as usize] as i32
     } 
 
     pub fn is_stacked(&self, tile: Tile) -> bool {
-        self.height(tile) > 1
+        self.height[tile as usize] > 1
     }
 
     fn zobrist(&self, t: Tile, p: Piece, h: u32) -> u64 {
@@ -169,16 +169,16 @@ impl Board {
         hash.rotate_left((h<<3) | (p.ptype() as u32))
     }
 
-    fn add_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
+    fn add_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
         if !vec.contains(&t) {
             vec.push(t);
         }
     }
 
-    fn remove_occupancy(occupied_hexes: &mut [Vec<Tile>; 2], p: Piece, t: Tile) {
+    fn remove_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
         let vec = &mut occupied_hexes[p.color().index()];
-        vec.swap_remove(vec.iter().position(|&x| x == t).unwrap());
+        vec.remove(t);
     }
 
     fn add_piece(&mut self, tile: Tile, piece: Piece) {
@@ -193,12 +193,16 @@ impl Board {
             self.queens[piece.color().index()] = Some(tile);
         }
 
+        self.height[tile as usize] += 1;
+
         self.zobrist_hash ^= self.zobrist(tile, piece, self.height(tile) as u32);
     }
 
     fn remove_piece(&mut self, tile: Tile) {
         
         self.zobrist_hash ^= self.zobrist(tile, self.world[tile as usize], self.height(tile) as u32);
+
+        self.height[tile as usize] -= 1;
 
         let curr = &mut self.world[tile as usize];
         debug_assert!(curr.is_some());
