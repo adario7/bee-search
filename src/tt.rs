@@ -12,13 +12,12 @@ pub enum TTFlag {
     OnlyEval = 4,
 }
 
-//#[repr(packed)] TODO: test consequences of this
 #[derive(Default, Copy, Clone, Debug)]
 pub struct TEntry {
-    pub hash: u32,
     pub pv: Action,
+    pub hash: u32,
     pub value: Value,
-    pub eval: Option<Eval>,
+    pub eval: Eval,
     pub depth: Depth,
     pub flag: TTFlag,
 }
@@ -69,7 +68,7 @@ impl TTable {
         Some(entry)
     }
 
-    pub fn put(&self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Option<Eval>, depth: Depth) {
+    pub fn put(&self, hash: u64, alpha: Value, beta: Value, pv: Action, value: Value, eval: Eval, depth: Depth) {
         let flag = if value >= beta {
             TTFlag::LowerBound
         } else if value <= alpha {
@@ -101,9 +100,6 @@ impl TTable {
             if entry.depth == curr.depth && entry.flag == TTFlag::UpperBound && curr.flag == TTFlag::UpperBound {
                 entry.value = entry.value.min(curr.value);
             }
-            if entry.eval.is_none() && curr.eval.is_some() {
-                entry.eval = curr.eval;
-            }
             *slot = entry;
         }
     }
@@ -114,9 +110,7 @@ impl TTable {
         if slot.flag == TTFlag::Null { // free spot
             slot.hash = check_bits(hash);
             slot.flag = TTFlag::OnlyEval;
-            slot.eval = Some(eval);
-        } else if slot.hash == check_bits(hash) && slot.eval.is_none() { // existing entry missing eval
-            slot.eval = Some(eval);
+            slot.eval = eval;
         }
     }
 

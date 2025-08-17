@@ -52,55 +52,27 @@ pub struct Board {
     // placeable tiles for both players
     // a tile is placeable for a player if he can put a piece that is not present on the board on it
     pub tiles_placeable: [TileSet; 2],
-
+    // how many pieces are place on each tile
+    pub height: [u8; GRID_SIZE],
+    // cache of pieces that are not movable
+    pub immovable: CachedValue<TileSet>,
+    // zobrist data
     pub zobrist_table: &'static [u64; GRID_SIZE * 2],
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
 
-    pub height: [u8; GRID_SIZE],
     #[cfg(feature = "gnn")]
     pub gnn: std::sync::Arc<GnnEvaluator>,
-
-    pub immovable: CachedValue<TileSet>,
 }
 
 pub const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
 
 impl Board {
     pub fn new() -> Self {
-
-        let zobrist_table = ZOBRIST_TABLE.get_or_init(|| {
-            let mut table = [0u64; GRID_SIZE * 2];
-            let mut hasher = DefaultHasher::new();
-            for (i, entry) in table.iter_mut().enumerate() {
-                hasher.write_usize(i);
-                *entry = hasher.finish();
-            }
-            table
-        });
-
-        Board {
-            gametype: "Base+MLP".to_string(),
-            world: [Piece::empty(); GRID_SIZE],
-            underworld: HashMap::new(),
-            placeable: [TOT_QTY, TOT_QTY],
-            queens: [None, None],
-            occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
-            turn_num: 0,
-            turn_history: Vec::new(),
-            tiles_placeable: [TileSet::new(), TileSet::new()],
-            zobrist_table,
-            zobrist_hash: 1,
-            zobrist_history: Vec::new(),
-            height: [0; GRID_SIZE],
-            #[cfg(feature = "gnn")]
-            gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
-            immovable: CachedValue::new(),
-        }
+        Self::new_mlp(1, 1, 1)
     }
 
     pub fn new_mlp(m: u8, l: u8, p: u8) -> Self {
-
         let zobrist_table = ZOBRIST_TABLE.get_or_init(|| {
             let mut table = [0u64; GRID_SIZE * 2];
             let mut hasher = DefaultHasher::new();
@@ -130,13 +102,13 @@ impl Board {
             turn_num: 0,
             turn_history: Vec::new(),
             tiles_placeable: [TileSet::new(), TileSet::new()],
+            height: [0; GRID_SIZE],
+            immovable: CachedValue::new(),
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
-            height: [0; GRID_SIZE],
             #[cfg(feature = "gnn")]
             gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
-            immovable: CachedValue::new(),
         }
     }
 

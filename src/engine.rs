@@ -246,14 +246,13 @@ impl Engine {
     }
 
     fn eval_with_caches(&self, board: &mut Board, entry: Option<TEntry>, moves: &mut Option<Vec<Action>>) -> Eval {
-        entry.and_then(|e| e.eval)
-            .unwrap_or_else(|| {
-                let mv = board.generate_moves();
-                let e = board.static_eval_fast(&mv);
-                *moves = Some(mv);
-                self.tt.put_eval(board.zobrist_hash, e);
-                e
-            })
+        entry.map(|e| e.eval).unwrap_or_else(|| {
+            let mv = board.generate_moves();
+            let e = board.static_eval_fast(&mv);
+            *moves = Some(mv);
+            self.tt.put_eval(board.zobrist_hash, e);
+            e
+        })
     }
 
     fn qsearch(&self, td: &mut ThreadData, ply: Depth, max_ply: Depth, mut alpha0: Value, mut beta: Value, killers: &mut KillerT) -> Option<Value> {
@@ -326,7 +325,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, Some(eval), QS_DEPTH);
+            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, QS_DEPTH);
         }
 
         Some(alpha)
@@ -454,7 +453,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, None /* TODO */, depth);
+            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, eval, depth);
         }
 
         // cast vote on the best move
