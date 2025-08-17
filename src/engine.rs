@@ -249,9 +249,8 @@ impl Engine {
         entry.and_then(|e| e.eval)
             .unwrap_or_else(|| {
                 let mv = board.generate_moves();
-                let len = mv.len();
+                let e = board.static_eval_fast(&mv);
                 *moves = Some(mv);
-                let e = board.static_eval_fast(len);
                 self.tt.put_eval(board.zobrist_hash, e);
                 e
             })
@@ -455,7 +454,7 @@ impl Engine {
 
         // update transposition table
         if let Some((value, mvi)) = best_move {
-            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, None, depth);
+            self.tt.put(td.board.zobrist_hash, alpha0, beta, mvi.mv, value, None /* TODO */, depth);
         }
 
         // cast vote on the best move
