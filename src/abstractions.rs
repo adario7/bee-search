@@ -1,7 +1,7 @@
 use crate::piece::Color;
 
 use crate::tile::{Tile, GRID_SIZE};
-use crate::board::{Action, Board};
+use crate::board::Action;
 use std::collections::HashSet;
 
 const TILESET_NUM_WORDS: usize = GRID_SIZE / 32;
@@ -83,37 +83,18 @@ impl PartialEq<CacheHash> for CacheHash {
 }
 
 #[derive(Debug, Clone)]
-pub struct CachedValue<T> {
-    cached_result: Option<T>,
-    cached_hash: Option<CacheHash>,
-}
+pub struct CachedValue<T>(Option<(CacheHash, T)>);
 
 impl<T> CachedValue<T>
 where
     T: Clone,
 {
     pub fn new() -> Self {
-        Self {
-            cached_result: None,
-            cached_hash: None,
-        }
-    }
-
-    pub fn get_or_compute<F>(&self, current_hash: CacheHash, board: &Board, compute_fn: F) -> T
-    where
-        F: FnOnce(&Board) -> T,
-    {
-        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
-            if *cached_hash == current_hash {
-                return cached_result.clone();
-            }
-        }
-
-        compute_fn(board)
+        Self(None)
     }
 
     pub fn get_if_valid(&self, current_hash: CacheHash) -> Option<&T> {
-        if let (Some(ref cached_result), Some(ref cached_hash)) = (&self.cached_result, &self.cached_hash) {
+        if let Some((cached_hash, cached_result)) = &self.0 {
             if *cached_hash == current_hash {
                 return Some(cached_result);
             }
@@ -122,12 +103,11 @@ where
     }
 
     pub fn update(&mut self, current_hash: CacheHash, value: T) {
-        self.cached_result = Some(value);
-        self.cached_hash = Some(current_hash);
+        self.0 = Some((current_hash, value));
     }
 
     pub fn is_valid(&self, current_hash: CacheHash) -> bool {
-        self.cached_hash.as_ref().map_or(false, |hash| *hash == current_hash)
+        self.0.as_ref().map_or(false, |x| x.0 == current_hash)
     }
 
 }

@@ -51,7 +51,7 @@ impl Board {
     }
 
     pub fn features_fast(&mut self, my_n: usize) -> [i64; Self::FN2] {
-        let immovable = self.find_cut_vertexes(); // TODO pass to movegen
+        let immovable = self.find_cut_vertexes();
         let other_n = self.other_n_moves();
         let a = self.features_for(self.color(), my_n as i64, &immovable);
         let b = self.features_for(self.color().other(), other_n as i64, &immovable);

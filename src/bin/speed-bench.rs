@@ -144,4 +144,5 @@ fn main() {
     println!("Total number of runs {}", args.num_runs);
     println!("Average engine nodes: {}", total_nodes / args.num_runs as u64);
     println!("Average engine think time: {:.3} seconds", total_think_time.as_secs_f64() / args.num_runs as f64);
+    println!("Average speed: {:.3} knodes/s", total_nodes as f64 / total_think_time.as_secs_f64() / 1000.0);
 }
