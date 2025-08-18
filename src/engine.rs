@@ -398,7 +398,7 @@ impl Engine {
         let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
 
         // razoring
-        if nt != NodeType::Pv && depth <= 6 && eval < alpha - 500 - 200 * depth as Eval * depth as Eval {
+        if nt != NodeType::Pv && depth <= 6 && (eval as i32) < (alpha as i32 - 500 - 200 * depth as i32 * depth as i32) {
             return self.qsearch(td, ply, ply * 2, alpha, beta, killers)
         }
 

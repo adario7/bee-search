@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
-use crate::eval::FEATURES_EVAL;
+use crate::eval::{FEATURES_EVAL, MLP_EVAL};
 use crate::perft;
 
 const FORCE_ST: bool = false;
@@ -56,7 +56,8 @@ impl Uhp {
         {
             print!("-GNN");
         }
-        if FEATURES_EVAL { print!("-F"); }
+        if MLP_EVAL { print!("-MLP"); }
+        else if FEATURES_EVAL { print!("-F"); }
         if FORCE_ST { print!("-ST"); }
         if cfg!(debug_assertions) { print!("-DEBUG"); }
         println!();

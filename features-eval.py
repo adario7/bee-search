@@ -6,6 +6,10 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+from itertools import chain
 
 def load_json(path):
 	if not os.path.exists(path):
@@ -66,6 +70,10 @@ if __name__ == "__main__":
 	p.add_argument("--test-size", type=float, default=0.1)
 	p.add_argument("--random-state", type=int, default=42)
 	p.add_argument("--clip", type=int, default=6000, help="Clip evaluations to [-clip, clip] before processing")
+	# MLP training hyperparams
+	p.add_argument("--mlp-epochs", type=int, default=50)
+	p.add_argument("--mlp-lr", type=float, default=1e-3)
+	p.add_argument("--mlp-batch", type=int, default=256)
 	args = p.parse_args()
 
 	evals_df = load_evals(args.evals, clip_val=args.clip)
@@ -158,3 +166,133 @@ if __name__ == "__main__":
 	print(f"Max |w2 + w1| (symmetry check): {symmetry_err:.6g}")
 	print("Reduced weights (first-half, equivalent to model on (first-half - second-half)):")
 	print(list(map(float, w1)))
+
+	# -------------------- MLP -------------------------
+
+	print("-- MLP --")
+
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	torch.manual_seed(args.random_state)
+
+	class HalfMLP(nn.Module):
+		def __init__(self, n_in, out_dim=4):
+			super().__init__()
+			self.net = nn.Sequential(
+				nn.Linear(n_in, 8),
+				nn.ReLU(),
+				nn.Linear(8, 6),
+				nn.ReLU(),
+				nn.Linear(6, out_dim),
+				nn.ReLU()
+			)
+		def forward(self, x):
+			return self.net(x)
+
+	class FinalMLP(nn.Module):
+		def __init__(self, in_dim=8):
+			super().__init__()
+			self.net = nn.Sequential(
+				nn.Linear(in_dim, 6),
+				nn.ReLU(),
+				nn.Linear(6, 4),
+				nn.ReLU(),
+				nn.Linear(4, 1)
+			)
+		def forward(self, x):
+			return self.net(x).squeeze(-1) * args.clip
+
+	shared = HalfMLP(N, out_dim=4).to(device)
+	final = FinalMLP(in_dim=8).to(device)
+	optimizer = torch.optim.Adam(list(shared.parameters()) + list(final.parameters()), lr=args.mlp_lr)
+	loss_fn = nn.MSELoss()
+
+	# prepare dataloaders
+	Xtr = torch.from_numpy(X_train_aug.astype(np.float32))
+	Ytr = torch.from_numpy(y_train_aug.astype(np.float32))
+	Xte = torch.from_numpy(X_test_aug.astype(np.float32))
+	Yte = torch.from_numpy(y_test_aug.astype(np.float32))
+
+	train_ds = TensorDataset(Xtr, Ytr)
+	train_loader = DataLoader(train_ds, batch_size=args.mlp_batch, shuffle=True)
+
+	best_val_loss = float('inf')
+	best_state = None
+	best_epoch = -1
+
+	shared.train(); final.train()
+	for epoch in range(args.mlp_epochs):
+		running_loss = 0.0
+		total = 0
+		for xb, yb in train_loader:
+			xb, yb = xb.to(device), yb.to(device)
+			h1 = shared(xb[:, :N]); h2 = shared(xb[:, N:])
+			conc = torch.cat([h1, h2], dim=1)
+			pred = final(conc)
+			loss = loss_fn(pred, yb)
+			optimizer.zero_grad(); loss.backward(); optimizer.step()
+			bs = xb.size(0)
+			running_loss += loss.item() * bs
+			total += bs
+		train_loss = running_loss / total
+
+		shared.eval(); final.eval()
+		with torch.no_grad():
+			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device)
+			h1 = shared(Xte_dev[:, :N]); h2 = shared(Xte_dev[:, N:])
+			conc = torch.cat([h1, h2], dim=1)
+			val_pred = final(conc)
+			val_loss = loss_fn(val_pred, Yte_dev).item()
+
+			if val_loss < best_val_loss:
+				best_val_loss = val_loss
+				best_epoch = epoch + 1
+				best_state = {
+					'shared': {k: v.cpu().clone() for k, v in shared.state_dict().items()},
+					'final': {k: v.cpu().clone() for k, v in final.state_dict().items()}
+				}
+
+		print(f"Epoch {epoch+1}/{args.mlp_epochs} - train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f}")
+
+	if best_state is not None:
+		shared.load_state_dict({k: v.to(device) for k, v in best_state['shared'].items()})
+		final.load_state_dict({k: v.to(device) for k, v in best_state['final'].items()})
+
+	shared.eval(); final.eval()
+	with torch.no_grad():
+		Xte_dev = Xte.to(device)
+		h1 = shared(Xte_dev[:, :N])
+		h2 = shared(Xte_dev[:, N:])
+		conc = torch.cat([h1, h2], dim=1)
+		mlp_preds = final(conc).cpu().numpy()
+
+	mlp_metrics = metrics(y_test_aug, mlp_preds)
+
+	print(f"\nBest epoch (by val loss): {best_epoch}, val_loss: {best_val_loss:.4f}")
+	print("\nMLP on test set (using best-epoch weights):")
+	print(f"  MSE: {mlp_metrics['mse']:.4f}")
+	print(f"  MAE: {mlp_metrics['mae']:.4f}")
+	print(f"  R2:  {mlp_metrics['r2']:.4f}")
+
+	print()
+	params = list(chain(shared.named_parameters(), final.named_parameters()))
+
+	next_layer = 0
+	last_bias_layer = None
+	for name, p in params:
+		arr = p.detach().cpu().numpy()
+		if arr.ndim == 2:
+			r, c = arr.shape
+			ident = f"W{next_layer}{next_layer+1}"
+			rows = []
+			for row in arr:
+				rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
+			body = "[\n  " + ",\n  ".join(rows) + "\n]"
+			print(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n")
+			last_bias_layer = next_layer + 1
+			next_layer += 1
+		elif arr.ndim == 1:
+			n = arr.shape[0]
+			layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
+			ident = f"B{layer_idx}"
+			body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr) + "]"
+			print(f"\tconst {ident}: [f32; {n}] = {body};\n")
