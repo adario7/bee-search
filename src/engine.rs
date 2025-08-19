@@ -1,6 +1,7 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
+use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}, tuning::RED_C};
 use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc}, time::{Duration, Instant}, u64, usize};
 use crossbeam::thread;
+use crate::tuning::*;
 
 pub type Depth = u8;
 const INF: Eval = 32500;
@@ -81,7 +82,7 @@ impl Drop for PendingMove<'_> {
 impl Engine {
     pub fn new() -> Self {
         let reductions = (0..1024).map(|i| if i == 0 { 0.0 } else {
-            0.68 * (i as f32).ln()
+            RED_C * (i as f32).ln()
         }).collect();
         let move_votes = (0..(GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1).map(|_| AtomicU64::new(0)).collect();
         Self {
@@ -227,9 +228,9 @@ impl Engine {
             self.minimax(td, child_t, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
-            let r = 1.0
+            let r = RED_B
                 + self.reductions[move_index] * self.reductions[depth as usize]
-                + match nt { NodeType::Pv => -1.5, NodeType::Cut => 2.8, _ => 0.0  };
+                + match nt { NodeType::Pv => -NTR_P, NodeType::Cut => NTR_C, _ => 0.0  };
             let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).round() as Depth;
             let mut score = -self.minimax(td,  child_t, nply, d, -(alpha+1), -alpha, killers)?;
             // if the reduced null window search fails, search again with a full window
@@ -398,20 +399,19 @@ impl Engine {
         let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
 
         // razoring
-        if nt != NodeType::Pv && depth <= 6 && (eval as i32) < (alpha as i32 - 500 - 200 * depth as i32 * depth as i32) {
+        if nt != NodeType::Pv && depth <= 6 && (eval as i32) < (alpha as i32 - RZO_B - RZO_C * depth as i32 * depth as i32) {
             return self.qsearch(td, ply, ply * 2, alpha, beta, killers)
         }
 
         // futility pruning
-        if depth <= 4 && eval as i64 > beta as i64 + 150 + 120 * depth as i64 && eval.abs() < 6000 {
+        if depth <= 4 && eval as i32 > beta as i32 + FTP_B + FTP_C * depth as i32 && eval.abs() < 6000 {
             return Some(self.fail_high(eval, beta));
         }
 
         // null move pruning
-        const NMR: Depth = 2;
-        if nt == NodeType::Cut && depth > NMR && eval >= beta + 50 {
+        if nt == NodeType::Cut && depth > NMP_D && eval >= beta + NMP_T {
             if eval >= beta {
-                let r = NMR + (depth - NMR) / 3;
+                let r = NMP_D + (depth - NMP_D) / 3;
                 let mut nm_klr = Default::default();
                 let pending = td.play_pending(Action::Pass);
                 let value = -self.minimax(pending.td, NodeType::All, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
@@ -479,7 +479,7 @@ impl Engine {
         // guess the value of the search will be around the previous result
         let guess = self.tt.get(td.board.zobrist_hash)
             .map(|e| e.value);
-        let w: i64 = 30 + td.id as i64;
+        let w: i64 = ASP_W + td.id as i64;
         let mut alpha = guess.map(|v| v as i64 - w).unwrap_or(-INF as i64);
         let mut beta = guess.map(|v| v as i64 + w).unwrap_or(INF as i64);
         let mut root_klr = Default::default();
