@@ -464,15 +464,17 @@ def update_victories(players, victories, position, swiss):
                 victories[1] += 0.5
             else:
                 raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result['winner']}")
+            
+            return result
 
 def play_black_white(position, player1, player2, swiss):
     victories1 = 0
     victories2 = 0
 
-    update_victories(players=[player1,player2], victories=[victories1, victories2], position=position, swiss=swiss)
-    update_victories(players=[player2,player1], victories=[victories2, victories1], position=position, swiss=swiss)
+    results = [update_victories(players=[player1,player2], victories=[victories1, victories2], position=position, swiss=swiss),
+               update_victories(players=[player2,player1], victories=[victories2, victories1], position=position, swiss=swiss)]
 
-    return [victories1, victories2]
+    return [victories1, victories2, results]
 
 class SwissTournament:
     # Ok probabilmente era meglio fare una funzione in HiveArena ma sticazzi dai
@@ -596,6 +598,8 @@ class SwissTournament:
 
         victories1 = 0
         victories2 = 0
+        match_results = []
+
         worker_func = functools.partial(
             play_black_white,
             player1=player1,
@@ -616,15 +620,18 @@ class SwissTournament:
             for result in results:
                 victories1 += result[0]
                 victories2 += result[1]
+                match_results += result[2]
 
 
-        return (victories1, victories2)
+        return (victories1, victories2, match_results)
 
     def run_tournament_simulation(self):
         optimal_rounds = self.get_optimal_rounds()
         print(f"Starting Swiss tournament with {len(self.players)} engines")
         print(f"Recommended rounds: {optimal_rounds}")
         
+        matches_results = []
+
         for _round_num in range(1, optimal_rounds + 1):
             pairings = self.schedule_round()
             
@@ -635,7 +642,8 @@ class SwissTournament:
                 p1, p2 = pairing
                 if p2 != "BYE":
                     
-                    v1, v2 = self.play_round_safe(p1, p2)
+                    v1, v2, match_results = self.play_round_safe(p1, p2)
+                    matches_results += match_results
                     if v1 > v2:
                         result = 1.0  # p1 wins
                     elif v1 == v2:
@@ -653,7 +661,7 @@ class SwissTournament:
 
         print("\n=== FINAL RANKING ===")
         self.print_standings()
-        return self.get_standings()
+        return (self.get_standings(), matches_results)
 
 def load_engines_with_names(engine_paths_file="logs/paths.txt"):
     engine_paths = []
@@ -704,8 +712,10 @@ if __name__ == '__main__':
     if args.swiss:
         tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose, processses=args.processes)
         ratings = tournament.run_tournament_simulation()
-        with open("logs/swiss_resutls.json", "w") as f:
-            json.dump(ratings, f)
+        with open(os.path.join(args.results_folder, "swiss_results.json"), "w") as f:
+            json.dump(ratings[0], f)
+        with open(os.path.join(args.results_folder, "results.json"), "w") as f:
+            json.dump(ratings[1], f, indent=2) # these are the results of each match played in the swiss torunament
         exit(0)
 
 
