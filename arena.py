@@ -478,7 +478,7 @@ def play_black_white(position, player1, player2, swiss):
 
 class SwissTournament:
     # Ok probabilmente era meglio fare una funzione in HiveArena ma sticazzi dai
-    def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False, processses=1):
+    def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False, processses=1, results_folder="logs/"):
         if len(engine_paths) & (len(engine_paths) - 1) != 0:
             raise ValueError("Number of engines must be a power of 2")
 
@@ -486,6 +486,7 @@ class SwissTournament:
         self.depth = depth
         self.verbose = verbose
         self.processes = processses
+        self.results_folder = results_folder
 
         engine_names = []
 
@@ -538,7 +539,7 @@ class SwissTournament:
         while len(unpaired) >= 2:
             player1 = unpaired.pop(0)
 
-            if player1.score <= best_score - 2:
+            if player1.score <= best_score - 3:
                 break
             
             best_opponent = None
@@ -655,6 +656,11 @@ class SwissTournament:
             # Record results
             self.record_results(results)
             self.print_standings()
+
+            with open(os.path.join(self.results_folder, "swiss_results.json"), "w") as f:
+                json.dump(self.get_standings(), f)
+            with open(os.path.join(self.results_folder, "results.json"), "w") as f:
+                json.dump(matches_results, f, indent=2) # these are the results of each match played in the swiss torunament
         
         if self.verbose:
             time.sleep(1)
@@ -710,7 +716,7 @@ if __name__ == '__main__':
                 raise ValueError(f"Names of different engines are the same: \n Name of engine at location \"{path_1}\" is {name_1} \n Name of engine at location \"{path_2}\" is {name_2}")
 
     if args.swiss:
-        tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose, processses=args.processes)
+        tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose, processses=args.processes, results_folder=args.results_folder)
         ratings = tournament.run_tournament_simulation()
         with open(os.path.join(args.results_folder, "swiss_results.json"), "w") as f:
             json.dump(ratings[0], f)
