@@ -24,6 +24,11 @@ def load_evals(path, clip_val):
 		raise KeyError("No 'evaluation' in evals")
 	df["evaluation"] = pd.to_numeric(df["evaluation"], errors="coerce").fillna(0).astype(int)
 	df["evaluation"] = df["evaluation"].clip(-clip_val, clip_val)
+	# new winner field 0..1
+	if "winner" not in df.columns:
+		raise KeyError("No 'winner' in evals")
+	df["winner"] = pd.to_numeric(df["winner"], errors="coerce").fillna(0.0).astype(float)
+	df["winner"] = df["winner"].clip(0.0, 1.0)
 	return df
 
 def load_features(path):
@@ -86,6 +91,7 @@ if __name__ == "__main__":
 
 	merged, X_full = expand_features(merged)
 	y_full = merged["evaluation"].values
+	winner_full = merged["winner"].values
 	positions = merged["position"].values
 
 	# split ORIGINAL rows to avoid leakage between original and its symmetric counterpart
@@ -101,35 +107,32 @@ if __name__ == "__main__":
 	def augment_indices(indices):
 		X_aug = []
 		y_aug = []
+		w_aug = []
 		static_aug = []
 		pos_aug = []
 		for i in indices:
 			f = X_full[i]
 			y = float(y_full[i])
+			w = float(winner_full[i])
 			pos = positions[i]
 			s = static_map.get(pos, None)
 			# original
 			X_aug.append(f.copy())
 			y_aug.append(y)
+			w_aug.append(w)
 			static_aug.append(None if s is None else float(s))
 			pos_aug.append(pos)
 			# swapped counterpart
 			f_swapped = np.concatenate([f[N:], f[:N]])
 			X_aug.append(f_swapped)
 			y_aug.append(-y)
+			w_aug.append(1.0 - w)
 			static_aug.append(None if s is None else -float(s))
 			pos_aug.append(pos + "_sym")  # mark as different to avoid accidental joins
-		return np.vstack(X_aug), np.array(y_aug), np.array(static_aug, dtype=object), pos_aug
+		return np.vstack(X_aug), np.array(y_aug), np.array(w_aug, dtype=float), np.array(static_aug, dtype=object), pos_aug
 
-	X_train_aug, y_train_aug, static_train_aug, pos_train_aug = augment_indices(idx_train)
-	X_test_aug, y_test_aug, static_test_aug, pos_test_aug = augment_indices(idx_test)
-
-	# fit linear model on FULL (2N) vectors but force intercept=0 to satisfy equivalence
-	model = LinearRegression(fit_intercept=False)
-	model.fit(X_train_aug, y_train_aug)
-	y_pred_test = model.predict(X_test_aug)
-
-	reg_metrics_full = metrics(y_test_aug, y_pred_test)
+	X_train_aug, y_train_aug, winner_train_aug, static_train_aug, pos_train_aug = augment_indices(idx_train)
+	X_test_aug, y_test_aug, winner_test_aug, static_test_aug, pos_test_aug = augment_indices(idx_test)
 
 	# prepare static predictor metrics: only on test augmented samples that have static
 	mask_static = np.array([s is not None for s in static_test_aug])
@@ -141,13 +144,6 @@ if __name__ == "__main__":
 		static_preds = np.array([s for s in static_test_aug[mask_static]], dtype=float)
 		static_metrics = metrics(y_test_sub, static_preds)
 
-	print(f"n_original_samples: {len(merged)}, n_features_full: {L}, N_half: {N}")
-	print(f"train_size (augmented): {len(X_train_aug)}, test_size (augmented): {len(X_test_aug)}, test_with_static: {n_test_with_static}")
-	print("\nLinear Regression (symmetric augmentation, intercept=0) on test set:")
-	print(f"  MSE: {reg_metrics_full['mse']:.4f}")
-	print(f"  MAE: {reg_metrics_full['mae']:.4f}")
-	print(f"  R2:  {reg_metrics_full['r2']:.4f}")
-
 	if static_metrics:
 		print("\nStatic_eval predictor (on same augmented subset):")
 		print(f"  MSE: {static_metrics['mse']:.4f}")
@@ -155,6 +151,21 @@ if __name__ == "__main__":
 		print(f"  R2:  {static_metrics['r2']:.4f}")
 	else:
 		print("\nNo static_eval available in test set for comparison.")
+
+	# fit linear model on FULL (2N) vectors but force intercept=0 to satisfy equivalence
+	model = LinearRegression(fit_intercept=False)
+	model.fit(X_train_aug, y_train_aug)
+	y_pred_test = model.predict(X_test_aug)
+
+	reg_metrics_full = metrics(y_test_aug, y_pred_test)
+
+
+	print(f"n_original_samples: {len(merged)}, n_features_full: {L}, N_half: {N}")
+	print(f"train_size (augmented): {len(X_train_aug)}, test_size (augmented): {len(X_test_aug)}, test_with_static: {n_test_with_static}")
+	print("\nLinear Regression (symmetric augmentation, intercept=0) on test set:")
+	print(f"  MSE: {reg_metrics_full['mse']:.4f}")
+	print(f"  MAE: {reg_metrics_full['mae']:.4f}")
+	print(f"  R2:  {reg_metrics_full['r2']:.4f}")
 
 	coeffs = model.coef_.astype(float)
 	w1 = coeffs[:N]
@@ -191,15 +202,19 @@ if __name__ == "__main__":
 	class FinalMLP(nn.Module):
 		def __init__(self, in_dim=8):
 			super().__init__()
+			# output two values: [eval_raw, winner_raw]
 			self.net = nn.Sequential(
 				nn.Linear(in_dim, 6),
 				nn.ReLU(),
 				nn.Linear(6, 4),
 				nn.ReLU(),
-				nn.Linear(4, 1)
+				nn.Linear(4, 2)
 			)
 		def forward(self, x):
-			return self.net(x).squeeze(-1) * args.clip
+			out = self.net(x)
+			eval_out = out[:, 0] * args.clip
+			winner_out = torch.sigmoid(out[:, 1])
+			return eval_out, winner_out
 
 	shared = HalfMLP(N, out_dim=4).to(device)
 	final = FinalMLP(in_dim=8).to(device)
@@ -209,10 +224,12 @@ if __name__ == "__main__":
 	# prepare dataloaders
 	Xtr = torch.from_numpy(X_train_aug.astype(np.float32))
 	Ytr = torch.from_numpy(y_train_aug.astype(np.float32))
+	Wtr = torch.from_numpy(winner_train_aug.astype(np.float32))
 	Xte = torch.from_numpy(X_test_aug.astype(np.float32))
 	Yte = torch.from_numpy(y_test_aug.astype(np.float32))
+	Wte = torch.from_numpy(winner_test_aug.astype(np.float32))
 
-	train_ds = TensorDataset(Xtr, Ytr)
+	train_ds = TensorDataset(Xtr, Ytr, Wtr)
 	train_loader = DataLoader(train_ds, batch_size=args.mlp_batch, shuffle=True)
 
 	best_val_loss = float('inf')
@@ -220,38 +237,51 @@ if __name__ == "__main__":
 	best_epoch = -1
 
 	shared.train(); final.train()
+	denom = max(1, (args.mlp_epochs - 1)*0.85)
 	for epoch in range(args.mlp_epochs):
-		running_loss = 0.0
+		running_eval_loss = 0.0
+		running_winner_loss = 0.0
+		running_total_loss = 0.0
 		total = 0
-		for xb, yb in train_loader:
-			xb, yb = xb.to(device), yb.to(device)
+		lambda_t = max(1.0, 1500.0 * (1.0 - (epoch / denom)))
+		lambda_sq = lambda_t * lambda_t
+		for xb, yb, wb in train_loader:
+			xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
 			h1 = shared(xb[:, :N]); h2 = shared(xb[:, N:])
 			conc = torch.cat([h1, h2], dim=1)
-			pred = final(conc)
-			loss = loss_fn(pred, yb)
+			pred_eval, pred_winner = final(conc)
+			loss_eval = loss_fn(pred_eval, yb)
+			loss_winner = loss_fn(pred_winner, wb)
+			loss = loss_eval + (lambda_sq * loss_winner)
 			optimizer.zero_grad(); loss.backward(); optimizer.step()
 			bs = xb.size(0)
-			running_loss += loss.item() * bs
+			running_eval_loss += loss_eval.item() * bs
+			running_winner_loss += loss_winner.item() * bs
+			running_total_loss += loss.item() * bs
 			total += bs
-		train_loss = running_loss / total
+		train_eval_loss = running_eval_loss / total
+		train_winner_loss = running_winner_loss / total
+		train_total_loss = running_total_loss / total
 
 		shared.eval(); final.eval()
 		with torch.no_grad():
-			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device)
+			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device); Wte_dev = Wte.to(device)
 			h1 = shared(Xte_dev[:, :N]); h2 = shared(Xte_dev[:, N:])
 			conc = torch.cat([h1, h2], dim=1)
-			val_pred = final(conc)
-			val_loss = loss_fn(val_pred, Yte_dev).item()
+			val_eval_pred, val_winner_pred = final(conc)
+			val_eval_loss = loss_fn(val_eval_pred, Yte_dev).item()
+			val_winner_loss = loss_fn(val_winner_pred, Wte_dev).item()
+			val_total_loss = val_eval_loss + (lambda_sq * val_winner_loss)
 
-			if val_loss < best_val_loss:
-				best_val_loss = val_loss
+			if val_eval_loss < best_val_loss:
+				best_val_loss = val_eval_loss
 				best_epoch = epoch + 1
 				best_state = {
 					'shared': {k: v.cpu().clone() for k, v in shared.state_dict().items()},
 					'final': {k: v.cpu().clone() for k, v in final.state_dict().items()}
 				}
 
-		print(f"Epoch {epoch+1}/{args.mlp_epochs} - train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f}")
+		print(f"Epoch {epoch+1}/{args.mlp_epochs} | \tTRAIN tot:{train_total_loss:.1f} eval:{train_eval_loss:.1f} win:{train_winner_loss:.6f} | \tTEST tot:{val_total_loss:.1f} eval:{val_eval_loss:.1f} win:{val_winner_loss:.6f}")
 
 	if best_state is not None:
 		shared.load_state_dict({k: v.to(device) for k, v in best_state['shared'].items()})
@@ -263,12 +293,13 @@ if __name__ == "__main__":
 		h1 = shared(Xte_dev[:, :N])
 		h2 = shared(Xte_dev[:, N:])
 		conc = torch.cat([h1, h2], dim=1)
-		mlp_preds = final(conc).cpu().numpy()
+		eval_preds, winner_preds = final(conc)
+		mlp_preds = eval_preds.cpu().numpy()
 
 	mlp_metrics = metrics(y_test_aug, mlp_preds)
 
-	print(f"\nBest epoch (by val loss): {best_epoch}, val_loss: {best_val_loss:.4f}")
-	print("\nMLP on test set (using best-epoch weights):")
+	print(f"\nBest epoch (by val loss): {best_epoch}, val_total_loss: {best_val_loss:.6f}")
+	print("\nMLP on test set (using best-epoch weights) - evaluation output:")
 	print(f"  MSE: {mlp_metrics['mse']:.4f}")
 	print(f"  MAE: {mlp_metrics['mae']:.4f}")
 	print(f"  R2:  {mlp_metrics['r2']:.4f}")
@@ -280,19 +311,31 @@ if __name__ == "__main__":
 	last_bias_layer = None
 	for name, p in params:
 		arr = p.detach().cpu().numpy()
+		is_final_last_w = name.endswith("net.4.weight")
+		is_final_last_b = name.endswith("net.4.bias")
 		if arr.ndim == 2:
-			r, c = arr.shape
+			# if this is the final layer producing 2 outputs, keep only the first row (eval head)
+			if is_final_last_w and arr.shape[0] == 2:
+				arr_print = arr[0:1, :]
+			else:
+				arr_print = arr
+			r, c = arr_print.shape
 			ident = f"W{next_layer}{next_layer+1}"
 			rows = []
-			for row in arr:
+			for row in arr_print:
 				rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
 			body = "[\n  " + ",\n  ".join(rows) + "\n]"
 			print(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n")
 			last_bias_layer = next_layer + 1
 			next_layer += 1
 		elif arr.ndim == 1:
-			n = arr.shape[0]
+			# if this is the final bias for the 2-output layer, keep only the first element
+			if is_final_last_b and arr.shape[0] == 2:
+				arr_print = arr[:1]
+			else:
+				arr_print = arr
+			n = arr_print.shape[0]
 			layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
 			ident = f"B{layer_idx}"
-			body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr) + "]"
+			body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr_print) + "]"
 			print(f"\tconst {ident}: [f32; {n}] = {body};\n")

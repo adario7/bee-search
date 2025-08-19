@@ -225,7 +225,8 @@ impl Uhp {
     }
 
     fn features(&mut self) -> UhpResult<()> {
-        let f = self.board.features_slow();
+        let mv = self.board.generate_moves();
+        let f = self.board.features_fast(&mv);
         println!("{}", f.iter().map(|&x| x.to_string()).collect::<Vec<_>>().join(";"));
         Ok(())
     }
