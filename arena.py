@@ -1,3 +1,4 @@
+import functools
 from io import text_encoding
 import subprocess
 import threading
@@ -15,6 +16,7 @@ try:
     from tqdm import tqdm
 except:
     progress_bar = False
+from multiprocessing import Pool, cpu_count
 
 MAX_THINK_TIME = 120  # maximum time for the engine to think (used if depth is used instead of timeout)
 THINK_TOL = 0.1  # tolerance for timeout
@@ -449,15 +451,39 @@ class Player:
         self.score = 0.0
         self.opponents = set()
 
+def update_victories(players, victories, position, swiss):
+            
+            result = swiss.arena.play_match(players[0].path, players[1].path, update_elo=False, verbose=swiss.verbose,
+                                           timeout=swiss.timeout, depth=swiss.depth, maxmoves=200, random_moves=4, from_position=position)
+            if result["winner"] == "white":
+                victories[0] += 1
+            elif result["winner"] == "black":
+                victories[1] += 1
+            elif result["winner"] == "draw" or result["winner"] == "other":
+                victories[0] += 0.5
+                victories[1] += 0.5
+            else:
+                raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result["winner"]}")
+
+def play_black_white(position, player1, player2, swiss):
+    victories1 = 0
+    victories2 = 0
+
+    update_victories(players=[player1,player2], victories=[victories1, victories2], position=position, swiss=swiss)
+    update_victories(players=[player2,player1], victories=[victories2, victories1], position=position, swiss=swiss)
+
+    return [victories1, victories2]
+
 class SwissTournament:
     # Ok probabilmente era meglio fare una funzione in HiveArena ma sticazzi dai
-    def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False):
+    def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False, processses=1):
         if len(engine_paths) & (len(engine_paths) - 1) != 0:
             raise ValueError("Number of engines must be a power of 2")
 
         self.timeout = timeout
         self.depth = depth
         self.verbose = verbose
+        self.processes = processses
 
         engine_names = []
 
@@ -570,23 +596,27 @@ class SwissTournament:
 
         victories1 = 0
         victories2 = 0
+        worker_func = functools.partial(
+            play_black_white,
+            player1=player1,
+            player2=player2,
+            swiss=self
+        )
+            
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['OPENBLAS_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        os.environ['NUMEXPR_NUM_THREADS'] = '1'
+        
+        starting_positions = self.starting_positions
+        with Pool(processes=self.processes) as pool:
+            
+            results = list(pool.imap(worker_func, starting_positions))
+            
+            for result in results:
+                victories1 += result[0]
+                victories2 += result[1]
 
-        def update_victories(players, victories):
-            result = self.arena.play_match(players[0].path, players[1].path, update_elo=False, verbose=self.verbose,
-                                           timeout=self.timeout, depth=self.depth, maxmoves=200, random_moves=4, from_position=position)
-            if result["winner"] == "white":
-                victories[0] += 1
-            elif result["winner"] == "black":
-                victories[1] += 1
-            elif result["winner"] == "draw" or result["winner"] == "other":
-                victories[0] += 0.5
-                victories[1] += 0.5
-            else:
-                raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result["winner"]}")
-
-        for position in self.starting_positions:
-            update_victories([player1,player2], [victories1, victories2])
-            update_victories([player2,player1], [victories2, victories1])
 
         return (victories1, victories2)
 
@@ -598,6 +628,8 @@ class SwissTournament:
         for _round_num in range(1, optimal_rounds + 1):
             pairings = self.schedule_round()
             
+            
+
             results = []
             for pairing in pairings:
                 p1, p2 = pairing
@@ -652,6 +684,8 @@ if __name__ == '__main__':
     group_eval_type = parser.add_mutually_exclusive_group(required=False)
     group_eval_type.add_argument("--timeout", type=float, default=5, help="Time per move")
     group_eval_type.add_argument("--depth", type=int, default=0, help="Depth for engine evaluation (not used in arena)")
+
+    parser.add_argument("--processes", type=int, default=1, help="Number of parallel processes for the arena (only works for swiss)")
     args = parser.parse_args()
 
     engine_paths, names = load_engines_with_names(args.engine_paths)
@@ -668,7 +702,7 @@ if __name__ == '__main__':
                 raise ValueError(f"Names of different engines are the same: \n Name of engine at location \"{path_1}\" is {name_1} \n Name of engine at location \"{path_2}\" is {name_2}")
 
     if args.swiss:
-        tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose)
+        tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose, processses=args.processes)
         ratings = tournament.run_tournament_simulation()
         with open("logs/swiss_resutls.json", "w") as f:
             json.dump(ratings, f)
