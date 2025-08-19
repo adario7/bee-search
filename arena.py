@@ -672,6 +672,7 @@ if __name__ == '__main__':
         ratings = tournament.run_tournament_simulation()
         with open("logs/swiss_resutls.json", "w") as f:
             json.dump(ratings, f)
+        exit(0)
 
 
     arena = HiveArena(engine_paths, results_folder=args.results_folder)
