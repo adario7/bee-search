@@ -463,7 +463,7 @@ def update_victories(players, victories, position, swiss):
                 victories[0] += 0.5
                 victories[1] += 0.5
             else:
-                raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result["winner"]}")
+                raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result['winner']}")
 
 def play_black_white(position, player1, player2, swiss):
     victories1 = 0
