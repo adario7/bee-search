@@ -4,6 +4,7 @@ import json
 from tqdm import tqdm
 import numpy as np
 import pickle
+from arena import game_is_ended
 
 default_engine_path = "build/release/bee-search"
 FEATURES_LEN = 12
@@ -66,6 +67,56 @@ def get_engine_eval(engine_path, positions, depth=5, timeout=120):
                 raise TimeoutError("Engine didn't respond")
     engine.terminate()
     return scores
+
+def get_fair_starting_positions(engine_path, random_moves=4, n_runs = 1000, depth = 8):
+    engine = Engine(engine_path)
+    starting_position = "Base+MLP;NotStarted;White[1]"
+    valid_positions = set()
+
+    for _ in range(n_runs):
+        position = starting_position
+        n_moves = 0
+        while n_moves < random_moves:
+            if game_is_ended(position):
+                break
+            try:
+                engine.send(f"newgame {position}")
+                response = engine.receive(timeout=1)
+                if len(response) == 0:
+                    raise TimeoutError(f"No newgame response from engine.")
+
+                engine.send(f"validmoves")
+                validmoves = engine.receive(timeout=1)
+                if len(validmoves)==0:
+                    raise TimeoutError(f"Engine {engine.name} couldn't find valid moves")
+                validmoves = validmoves[0].split(';')
+
+                move = str(np.random.choice(validmoves))
+                    
+                engine.send(f"play {move}")
+                response = engine.receive(timeout=1)
+                if len(response)==0:
+                    raise TimeoutError(f"No play from engine {engine.name}.")
+                prev_position = position
+                position = response[0]
+                n_moves += 1
+            except TimeoutError as e:
+                error = str(e)
+                print(e)
+                print(f"Unable to connnect with engine {engine.name}")
+                break
+            except IndexError as e:
+                error = str(e)
+                print(e)
+                print("Probably an invalid move was made in this position:")
+                print(prev_position)
+                position = prev_position
+                break
+                
+        if n_moves == random_moves:
+            valid_positions.add(position)
+        
+    return get_engine_eval(engine_path=engine_path, positions=list(valid_positions), depth=depth)
 
 def load_results(results_file):
     if not os.path.exists(results_file):
@@ -265,8 +316,15 @@ if __name__ == "__main__":
                         help="Path to save the global features JSON file.")
     parser.add_argument("--graphs-path", type=str, default=None,
                         help="Path to save the graphs pickle file.")
+    parser.add_argument("--get-fair-positions", action="store_true")
 
     args = parser.parse_args()
+
+    if args.get_fair_positions:
+        scores = get_fair_starting_positions(engine_path=args.engine)
+        with open("logs/fair_positions.json", "w") as f:
+            json.dump(scores, f, indent=2)
+        exit(0) 
 
     engine = Engine(args.engine)
     positions, win_prob = get_positions_from_results(args.results_paths, engine)

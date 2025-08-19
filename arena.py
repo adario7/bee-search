@@ -9,6 +9,7 @@ import os
 import argparse
 import random
 import numpy as np
+import re
 progress_bar = True
 try:
     from tqdm import tqdm
@@ -142,6 +143,10 @@ def path_to_name(path):
     engine.terminate()
     return name
 
+def get_n_moves_from_position(position: str):
+    moves_str = position.split(';')[2]
+    return int(re.search(r"\[(\d+)\]", moves_str).group(1))
+
 class HiveArena:
     def __init__(self, engine_paths, results_folder="logs/"):
         self.engine_paths = engine_paths
@@ -237,18 +242,20 @@ class HiveArena:
             a, b = b, a
         return a, b
 
-    def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves):
+    def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves, from_position=None):
         position = self.starting_position
+        if from_position:
+            position = from_position
         engines = [Engine(white_path), Engine(black_path)]
 
         if verbose:
             print(f"White player: {engines[0].name}")
             print(f"Black player: {engines[1].name}")
 
-        turn = 0  # 0 = white, 1 = black
-        colors = ['white', 'black']
+        n_moves = get_n_moves_from_position(position)
 
-        n_moves = 0
+        turn = n_moves & 1  # 0 = white, 1 = black
+        colors = ['white', 'black']
 
         prev_position = self.starting_position
         moves = []
@@ -435,6 +442,187 @@ class HiveArena:
             self.save_results()
             self.save_ratings()
 
+class Player:
+    def __init__(self, name, path):
+        self.name = name
+        self.path = path
+        self.score = 0.0
+        self.opponents = set()
+
+class SwissTournament:
+    # Ok probabilmente era meglio fare una funzione in HiveArena ma sticazzi dai
+    def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False):
+        if len(engine_paths) & (len(engine_paths) - 1) != 0:
+            raise ValueError("Number of engines must be a power of 2")
+
+        self.timeout = timeout
+        self.depth = depth
+        self.verbose = verbose
+
+        engine_names = []
+
+        for path in engine_paths:
+            engine = Engine(path)
+            engine_names.append((engine.name, path))
+            engine.terminate()
+        
+        self.players = {}
+        for name, path in engine_names:
+            self.players[name] = Player(name=name, path=path)
+        
+        self.rounds = []
+        self.current_round = 0
+        self.arena = HiveArena(engine_paths)
+
+        self.starting_positions = [self.arena.starting_position]
+        if fair_positions_path:
+            if not fair_positions_number:
+                raise ValueError("Error provide the number of fair positions to be selected from the fair positions file")
+            self.starting_positions = []
+            with open("logs/fair_positions.json") as f:
+                scores = json.load(f)
+
+            scores_list = sorted([(abs(score["evaluation"]), score["position"]) for score in scores])
+
+            for i in range(min(len(scores_list), fair_positions_number)):
+                self.starting_positions.append(scores_list[i][1])
+
+
+    def get_optimal_rounds(self):
+        n = len(self.players)
+        if n <= 8:
+            return min(6, n - 1)
+        elif n <= 16:
+            return min(7, n - 1)
+        else:
+            return min(8, n - 1)
+    
+    def create_pairings(self):
+        players_list = list(self.players.values())
+        
+        players_list.sort(key=lambda p: (-p.score, p.name))
+
+        best_score= players_list[0].score
+        
+        pairings = []
+        unpaired = players_list[:]
+        
+        while len(unpaired) >= 2:
+            player1 = unpaired.pop(0)
+
+            if player1.score <= best_score - 2:
+                break
+            
+            best_opponent = None
+            best_index = -1
+            
+            for i, player2 in enumerate(unpaired):
+                if player2.name not in player1.opponents:
+                    best_opponent = player2
+                    best_index = i
+                    break
+            
+            if best_opponent is None:
+                best_opponent = unpaired[0]
+                best_index = 0
+            
+            unpaired.pop(best_index)
+            pairings.append((player1, best_opponent))
+            
+            player1.opponents.add(best_opponent.name)
+            best_opponent.opponents.add(player1.name)
+        
+        if unpaired:
+            pairings.append((unpaired[0], "BYE"))
+            self.players[unpaired[0].name].score += 0.5
+        
+        return pairings
+    
+    def schedule_round(self):
+        self.current_round += 1
+        pairings = self.create_pairings()
+        self.rounds.append(pairings)
+        return pairings
+    
+    def record_results(self, results):
+        for player1, player2, result in results:
+            if player2 == "BYE":
+                continue 
+                
+            self.players[player1.name].score += result
+            self.players[player2.name].score += (1.0 - result)
+    
+    def get_standings(self):
+        standings = []
+        for p in self.players.values():
+            standings.append((p.name, p.score))
+        standings.sort(key=lambda x: (-x[1], x[0]))
+        return standings
+    
+    def print_standings(self):
+        standings = self.get_standings()
+        print(f"\n=== STANDINGS AFTER ROUND {self.current_round} ===")
+        for i, standing in enumerate(standings, 1):
+            name, score = standing
+            print(f"{i:2d}. {name:<15} {score:4.1f} points")
+    
+    def play_round_safe(self, player1, player2):
+
+        victories1 = 0
+        victories2 = 0
+
+        def update_victories(players, victories):
+            result = self.arena.play_match(players[0].path, players[1].path, update_elo=False, verbose=self.verbose,
+                                           timeout=self.timeout, depth=self.depth, maxmoves=200, random_moves=4, from_position=position)
+            if result["winner"] == "white":
+                victories[0] += 1
+            elif result["winner"] == "black":
+                victories[1] += 1
+            elif result["winner"] == "draw" or result["winner"] == "other":
+                victories[0] += 0.5
+                victories[1] += 0.5
+            else:
+                raise ValueError(f"Error: unrecognised value for result[\"winner\"], got value {result["winner"]}")
+
+        for position in self.starting_positions:
+            update_victories([player1,player2], [victories1, victories2])
+            update_victories([player2,player1], [victories2, victories1])
+
+        return (victories1, victories2)
+
+    def run_tournament_simulation(self):
+        optimal_rounds = self.get_optimal_rounds()
+        print(f"Starting Swiss tournament with {len(self.players)} engines")
+        print(f"Recommended rounds: {optimal_rounds}")
+        
+        for _round_num in range(1, optimal_rounds + 1):
+            pairings = self.schedule_round()
+            
+            results = []
+            for pairing in pairings:
+                p1, p2 = pairing
+                if p2 != "BYE":
+                    
+                    v1, v2 = self.play_round_safe(p1, p2)
+                    if v1 > v2:
+                        result = 1.0  # p1 wins
+                    elif v1 == v2:
+                        result = 0.5  # draw
+                    else:
+                        result = 0.0  # p2 wins
+                    results.append((p1, p2, result))
+            
+            # Record results
+            self.record_results(results)
+            self.print_standings()
+        
+        if self.verbose:
+            time.sleep(1)
+
+        print("\n=== FINAL RANKING ===")
+        self.print_standings()
+        return self.get_standings()
+
 def load_engines_with_names(engine_paths_file="logs/paths.txt"):
     engine_paths = []
     names = []
@@ -455,11 +643,15 @@ if __name__ == '__main__':
     parser.add_argument("--results-folder", type=str, default="logs/", help="Folder where the matches are stored")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
     parser.add_argument("--random-moves", type=int, default=0, help="Number of initial random moves")
-    parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
+    group_tournament_type = parser.add_mutually_exclusive_group()
+    group_tournament_type.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
+    group_tournament_type.add_argument("--swiss", action="store_true", help="Run Swiss tournament ")
+    parser.add_argument("--fair-positions-path", type=str, default="logs/fair_positions.json", help="Path to json of evaluated positions to pick for first position")
+    parser.add_argument("--fair-positions-number", type=int, default=5, help="Number of positions to pick")
     
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument("--timeout", type=float, default=5, help="Time per move")
-    group.add_argument("--depth", type=int, default=0, help="Depth for engine evaluation (not used in arena)")
+    group_eval_type = parser.add_mutually_exclusive_group(required=False)
+    group_eval_type.add_argument("--timeout", type=float, default=5, help="Time per move")
+    group_eval_type.add_argument("--depth", type=int, default=0, help="Depth for engine evaluation (not used in arena)")
     args = parser.parse_args()
 
     engine_paths, names = load_engines_with_names(args.engine_paths)
@@ -474,6 +666,12 @@ if __name__ == '__main__':
                 raise ValueError(f"Two different engines at the same location: \"{path_1}\"")
             elif name_1 == name_2:
                 raise ValueError(f"Names of different engines are the same: \n Name of engine at location \"{path_1}\" is {name_1} \n Name of engine at location \"{path_2}\" is {name_2}")
+
+    if args.swiss:
+        tournament = SwissTournament(engine_paths=engine_paths, fair_positions_path=args.fair_positions_path, fair_positions_number=args.fair_positions_number, timeout=args.timeout, depth=args.depth, verbose=args.verbose)
+        ratings = tournament.run_tournament_simulation()
+        with open("logs/swiss_resutls.json", "w") as f:
+            json.dump(ratings, f)
 
 
     arena = HiveArena(engine_paths, results_folder=args.results_folder)
