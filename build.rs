@@ -2,7 +2,7 @@ use std::process::Command;
 
 fn main() {
     let hash = Command::new("git")
-        .args(&["describe", "--always", "--dirty"])
+        .args(&["describe", "--always"])
         .output()
         .unwrap();
     println!("cargo:rustc-env=GIT_HASH={}", String::from_utf8_lossy(&hash.stdout).trim());

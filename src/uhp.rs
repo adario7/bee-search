@@ -6,6 +6,7 @@ use crate::board::Board;
 use crate::engine::{Depth, Engine};
 use crate::eval::{FEATURES_EVAL, MLP_EVAL};
 use crate::perft;
+use crate::tuning::TUNING_STRS;
 
 const FORCE_ST: bool = false;
 const MAX_THREADS: usize = if FORCE_ST { 1 } else { 32 };
@@ -58,6 +59,8 @@ impl Uhp {
         }
         if MLP_EVAL { print!("-MLP"); }
         else if FEATURES_EVAL { print!("-F"); }
+        let tuning = TUNING_STRS.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("-");
+        if !tuning.is_empty() { print!("-{}", tuning); }
         if FORCE_ST { print!("-ST"); }
         if cfg!(debug_assertions) { print!("-DEBUG"); }
         println!();
