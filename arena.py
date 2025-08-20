@@ -451,14 +451,14 @@ class Player:
         self.score = 0.0
         self.opponents = set()
 
-def update_victories(players, victories, position, swiss):
+def update_victories(players, victories, rev, position, swiss):
             
             result = swiss.arena.play_match(players[0].path, players[1].path, update_elo=False, verbose=swiss.verbose,
                                            timeout=swiss.timeout, depth=swiss.depth, maxmoves=200, random_moves=4, from_position=position)
             if result["winner"] == "white":
-                victories[0] += 1
+                victories[0^rev] += 1
             elif result["winner"] == "black":
-                victories[1] += 1
+                victories[1^rev] += 1
             elif result["winner"] == "draw" or result["winner"] == "other":
                 victories[0] += 0.5
                 victories[1] += 0.5
@@ -468,15 +468,25 @@ def update_victories(players, victories, position, swiss):
             return result
 
 def play_black_white(position, player1, player2, swiss):
-    victories1 = 0
-    victories2 = 0
+    victories = [0,0]
 
-    results = [update_victories(players=[player1,player2], victories=[victories1, victories2], position=position, swiss=swiss),
-               update_victories(players=[player2,player1], victories=[victories2, victories1], position=position, swiss=swiss)]
+    results = [update_victories(players=[player1,player2], victories=victories, rev=0, position=position, swiss=swiss),
+               update_victories(players=[player2,player1], victories=victories, rev=1, position=position, swiss=swiss)]
 
-    return [victories1, victories2, results]
+    return [victories[0], victories[1], results]
+
+def play_match(data, swiss):
+    player1, player2, position = data[0], data[1]
 
 class SwissTournament:
+
+    def load_results(self):
+        if os.path.exists(self.results_file):
+            with open(self.results_file, "r") as f:
+                self.match_results = json.load(f)
+        else:
+            self.match_results = []
+
     # Ok probabilmente era meglio fare una funzione in HiveArena ma sticazzi dai
     def __init__(self, engine_paths, fair_positions_path=None, fair_positions_number=None, timeout=5, depth=0, verbose=False, processses=1, results_folder="logs/"):
         if len(engine_paths) & (len(engine_paths) - 1) != 0:
@@ -487,6 +497,8 @@ class SwissTournament:
         self.verbose = verbose
         self.processes = processses
         self.results_folder = results_folder
+        self.results_file = os.path.join(results_folder, "results.json")
+        self.load_results()
 
         engine_names = []
 
@@ -567,6 +579,26 @@ class SwissTournament:
         
         return pairings
     
+    def create_matches_safe(self, p1, p2):
+        
+        to_play = []
+        for position in self.starting_positions:
+            to_play.append([p1, p2, position])
+            to_play.append([p2, p1, position])
+        
+        return to_play
+
+    def create_matches_to_play(self, pairings):
+        
+        to_play = []
+        for p1, p2 in pairings:
+            if p2 == "BYE":
+                continue
+
+            to_play += self.create_matches_safe(p1, p2)
+
+        return to_play
+    
     def schedule_round(self):
         self.current_round += 1
         pairings = self.create_pairings()
@@ -627,11 +659,12 @@ class SwissTournament:
         return (victories1, victories2, match_results)
 
     def run_tournament_simulation(self):
+        matches_results = self.match_results
         optimal_rounds = self.get_optimal_rounds()
         print(f"Starting Swiss tournament with {len(self.players)} engines")
         print(f"Recommended rounds: {optimal_rounds}")
-        
-        matches_results = []
+
+        standings_history = []
 
         for _round_num in range(1, optimal_rounds + 1):
             pairings = self.schedule_round()
@@ -652,16 +685,17 @@ class SwissTournament:
                     else:
                         result = 0.0  # p2 wins
                     results.append((p1, p2, result))
+                with open(os.path.join(self.results_folder, "results.json"), "w") as f:
+                    json.dump(matches_results, f, indent=2) # these are the results of each match played in the swiss torunament
+        
             
             # Record results
             self.record_results(results)
             self.print_standings()
-
+            standings_history.append(self.get_standings())
             with open(os.path.join(self.results_folder, "swiss_results.json"), "w") as f:
-                json.dump(self.get_standings(), f)
-            with open(os.path.join(self.results_folder, "results.json"), "w") as f:
-                json.dump(matches_results, f, indent=2) # these are the results of each match played in the swiss torunament
-        
+                json.dump(standings_history, f)
+            
         if self.verbose:
             time.sleep(1)
 
