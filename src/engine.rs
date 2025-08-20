@@ -81,7 +81,7 @@ impl Drop for PendingMove<'_> {
 impl Engine {
     pub fn new() -> Self {
         let reductions = (0..1024).map(|i| if i == 0 { 0.0 } else {
-            0.68 * (i as f32).ln()
+            0.55 * (i as f32).ln()
         }).collect();
         let move_votes = (0..(GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1).map(|_| AtomicU64::new(0)).collect();
         Self {
@@ -227,9 +227,9 @@ impl Engine {
             self.minimax(td, child_t, nply, ndepth, -beta, -alpha, killers).map(|v| -v)
         } else {
             // search the next moves with a null window to prove it is <= alpha
-            let r = 1.0
+            let r = 0.8
                 + self.reductions[move_index] * self.reductions[depth as usize]
-                + match nt { NodeType::Pv => -1.5, NodeType::Cut => 2.8, _ => 0.0  };
+                + match nt { NodeType::Pv => -1.0, NodeType::Cut => 2.3, _ => 0.0  };
             let d = (ndepth as f32 - r).max(1.0).min(ndepth as f32).round() as Depth;
             let mut score = -self.minimax(td,  child_t, nply, d, -(alpha+1), -alpha, killers)?;
             // if the reduced null window search fails, search again with a full window
@@ -403,7 +403,7 @@ impl Engine {
         }
 
         // futility pruning
-        if depth <= 4 && eval as i64 > beta as i64 + 150 + 120 * depth as i64 && eval.abs() < 6000 {
+        if depth <= 4 && eval as i64 > beta as i64 + 150 + 100 * depth as i64 && eval.abs() < 6000 {
             return Some(self.fail_high(eval, beta));
         }
 
