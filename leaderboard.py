@@ -10,21 +10,24 @@ target = "MzingaEngine v0.15.1"
 
 def full_name(name):
 	stem = name_to_stem.get(name)
+	name = name.replace("-dirty", "")
 	return f"{name} ({stem})" if stem else name
 
 with open('logs/results.json') as f, open('/tmp/games.pgn', 'w') as out:
-    for r in json.load(f):
-        g = chess.pgn.Game()
-        for color in ('White', 'Black'):
-            name = r[color.lower()]
-            g.headers[color] = full_name(name)
-        g.headers["Result"] = {"white":"1-0","black":"0-1"}.get(r["winner"],"1/2-1/2")
-        g.headers["Date"] = r["datetime"].split("T")[0]
-        g.comment = r["final_gamestate"]
-        out.write(str(g) + "\n")
+	for r in json.load(f):
+		if r["winner"] == "other": continue
+		if r.get("error", None): continue
+		g = chess.pgn.Game()
+		for color in ('White', 'Black'):
+			name = r[color.lower()]
+			g.headers[color] = full_name(name)
+		g.headers["Result"] = {"white":"1-0","black":"0-1"}.get(r["winner"],"1/2-1/2")
+		g.headers["Date"] = r["datetime"].split("T")[0]
+		g.comment = r["final_gamestate"]
+		out.write(str(g) + "\n")
 
 # https://github.com/michiguel/Ordo
 args = ["ordo","-p","/tmp/games.pgn","-a","0","-W","-D"]
 if target in names:
-    args += ["-A", full_name(target)]
+	args += ["-A", full_name(target)]
 subprocess.run(args)

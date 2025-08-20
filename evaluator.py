@@ -280,6 +280,9 @@ if __name__ == "__main__":
     for pos in positions:
         if pos in evals_map:
             evals_map[pos]["winner"] = win_prob[pos]
+    with open(args.evals_path, "w") as f:
+        json.dump(list(evals_map.values()), f, indent=1)
+    print(f"Evaluations saved to {args.evals_path}")
 
     # Run evaluation on the filtered list
     if positions_to_eval:

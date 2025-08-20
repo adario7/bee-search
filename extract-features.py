@@ -11,8 +11,7 @@ def load_json(path):
 def init_engine(path, timeout=1):
     e = Engine(path)
     try:
-        e.send("newgame Base"); e.receive(timeout=timeout)
-        e.send("bestmove depth 1"); e.receive(timeout=timeout)
+        e.command("newgame Base", timeout)
     except Exception:
         pass
     return e

@@ -1,7 +1,7 @@
 use crate::{abstractions::TileSet, board::{Action, Board}, piece::Color, piece_type::PCT_COUNT, tile::adjacent};
 
 impl Board {
-    pub const FN: usize = 5 + PCT_COUNT*5;
+    pub const FN: usize = 4 + PCT_COUNT*6;
     pub const FN2: usize = Self::FN * 2;
 
     fn features_for(&self, color: Color, move_n: [u16; PCT_COUNT], immovable: &TileSet, out: &mut [i16]) {
@@ -18,27 +18,23 @@ impl Board {
                 near_pct[ally as usize][pc.ptype().index()] += 1;
             }
         }
-        let queen_height = if let Some(tile) = qtile {
-            self.height(tile)
-        } else {
-            0
-        } > 1;
-        let mut placed = [0; PCT_COUNT];
+        let mut movable = [0; PCT_COUNT];
         let mut fixed = [0; PCT_COUNT];
-        for &tile in self.occupied_tiles[color.index()].iter().chain(self.occupied_tiles[color.other().index()].iter()) {
-            if self.tile(tile).color() == color {
-                let pct = self.tile(tile).ptype();
-                placed[pct.index()] += 1;
-                let walks = self.height(tile) > 1;
-                if immovable.get(tile) && !walks {
-                    fixed[pct.index()] += 1;
-                }
+        let mut buried = [0; PCT_COUNT];
+        for &tile in self.occupied_tiles[color.index()].iter() {
+            let pct = self.tile(tile).ptype();
+            let walks = self.height(tile) > 1;
+            if immovable.get(tile) && !walks {
+                fixed[pct.index()] += 1;
+            } else {
+                movable[pct.index()] += 1;
             }
+        }
+        for &tile in self.occupied_tiles[color.other().index()].iter() {
             if self.height(tile) > 1 {
                 for pc in self.underworld.get(&tile).unwrap_or(&vec![]).iter() {
                     if pc.color() == color {
-                        placed[pc.ptype().index()] += 1;
-                        fixed[pc.ptype().index()] += 1;
+                        buried[pc.ptype().index()] += 1;
                     }
                 }
             }
@@ -47,13 +43,13 @@ impl Board {
         out[1] = liberties[0][1];
         out[2] = liberties[1][0];
         out[3] = liberties[1][1];
-        out[4] = queen_height as i16;
         for i in 0..PCT_COUNT {
-            out[5 + i*5 + 0] = placed[i] as i16;
-            out[5 + i*5 + 1] = fixed[i] as i16;
-            out[5 + i*5 + 2] = move_n[i] as i16;
-            out[5 + i*5 + 3] = near_pct[0][i] as i16;
-            out[5 + i*5 + 4] = near_pct[1][i] as i16;
+            out[4 + i*6 + 0] = movable[i] as i16;
+            out[4 + i*6 + 1] = fixed[i] as i16;
+            out[4 + i*6 + 2] = buried[i] as i16;
+            out[4 + i*6 + 3] = move_n[i] as i16;
+            out[4 + i*6 + 4] = near_pct[0][i] as i16;
+            out[4 + i*6 + 5] = near_pct[1][i] as i16;
         }
     }
 
