@@ -5,4 +5,4 @@ RUN apt-get update && apt-get install -y git mold && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release
 
-CMD ["./build/release/bee-search"]
+CMD ["sh", "-c", "if [ -f ./build/release/bee-search ]; then ./build/release/bee-search; else ./target/release/bee-search; fi"]
