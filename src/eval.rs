@@ -3,7 +3,7 @@ use crate::{board::{Action, Board}, tile::adjacent};
 pub type Eval = i16;
 pub type Value = Eval;
 
-pub const MLP_EVAL: bool = false;
+pub const MLP_EVAL: bool = true;
 pub const FEATURES_EVAL: bool = true;
 
 impl Board {
