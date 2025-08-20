@@ -256,7 +256,19 @@ impl Board {
         }
     }
 
+    fn count_repetitions(&self) -> usize {
+        if self.zobrist_history.len() <= 10 { return 1; }
+        1 + self.zobrist_history
+            .iter().rev().step_by(4).skip(1).take(8)
+            .filter(|&&hash| hash == self.zobrist_hash)
+            .count()
+    }
+
     pub fn game_result(&self) -> GameResult {
+        let repetitions = self.count_repetitions();
+        if repetitions >= 3 {
+            return GameResult::Draw;
+        }
         let sw = self.queen_surround(Color::White);
         let sb = self.queen_surround(Color::Black);
         match (sw, sb) {
