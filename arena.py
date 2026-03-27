@@ -249,7 +249,7 @@ class HiveArena:
             a, b = b, a
         return a, b
 
-    def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves):
+    def play_match(self, white_path, black_path, update_elo, verbose, timeout, depth, maxmoves, random_moves, predefined_random_moves=None):
         position = self.starting_position
         engines = [Engine(white_path), Engine(black_path)]
 
@@ -285,7 +285,10 @@ class HiveArena:
                 validmoves = validmoves[0].split(';')
 
                 if n_moves < random_moves:
-                    move = str(np.random.choice(validmoves))
+                    if predefined_random_moves is not None and n_moves < len(predefined_random_moves):
+                        move = predefined_random_moves[n_moves]
+                    else:
+                        move = str(np.random.choice(validmoves))
                 else:
                     if depth > 0:
                         engine.send(f"bestmove depth {depth}")
@@ -352,7 +355,8 @@ class HiveArena:
             "final_gamestate": position,
             "datetime": datetime.datetime.now().isoformat(),
             "move_duration": timeout,
-            "random_moves": random_moves
+            "random_moves": random_moves,
+            "initial_moves": moves[:random_moves]
         }
         if error: result["error"] = error
         return result
@@ -401,9 +405,9 @@ class HiveArena:
                 
                 match_count += 1
                 if verbose:
-                    print(f"\n--- Match {match_count} ---")
+                    print(f"\n--- Match {match_count} (A) ---")
                 
-                result = self.play_match(white_path=white_path,
+                result1 = self.play_match(white_path=white_path,
                                         black_path=black_path, 
                                         update_elo=update_elo, 
                                         verbose=verbose,
@@ -411,7 +415,23 @@ class HiveArena:
                                         depth=depth,
                                         maxmoves=maxmoves,
                                         random_moves=random_moves)
-                self.results.append(result)
+                
+                # Play reverse match
+                if verbose:
+                    print(f"\n--- Match {match_count} (B) ---")
+                
+                result2 = self.play_match(white_path=black_path,
+                                        black_path=white_path, 
+                                        update_elo=update_elo, 
+                                        verbose=verbose,
+                                        timeout=timeout,
+                                        depth=depth,
+                                        maxmoves=maxmoves,
+                                        random_moves=random_moves,
+                                        predefined_random_moves=result1.get("initial_moves"))
+                
+                self.results.append(result1)
+                self.results.append(result2)
                 
                 self.save_results()
                 if update_elo:
@@ -424,17 +444,18 @@ class HiveArena:
     def all_v_all(self, n_matches, update_elo, verbose, timeout, depth, maxmoves, random_moves):
         n_engines = len(self.engine_paths)
 
-        matches = []
+        matches_pairs = []
         for _ in range(n_matches):
             for i in range(n_engines):
-                for j in range(n_engines):
-                    if i != j:
-                        matches.append((i, j))
+                for j in range(i + 1, n_engines):
+                    matches_pairs.append((i, j))
+                    
         if progress_bar and not verbose:
-            matches = tqdm(matches)
+            matches_pairs = tqdm(matches_pairs)
 
-        for i, j in matches:
-            result = self.play_match(white_path=self.engine_paths[i],
+        for i, j in matches_pairs:
+            # First match: A vs B
+            result1 = self.play_match(white_path=self.engine_paths[i],
                                     black_path=self.engine_paths[j], 
                                     update_elo=update_elo, 
                                     verbose=verbose,
@@ -442,7 +463,20 @@ class HiveArena:
                                     depth=depth,
                                     maxmoves=maxmoves,
                                     random_moves=random_moves)
-            self.results.append(result)
+            
+            # Second match: B vs A with same random moves
+            result2 = self.play_match(white_path=self.engine_paths[j],
+                                    black_path=self.engine_paths[i], 
+                                    update_elo=update_elo, 
+                                    verbose=verbose,
+                                    timeout=timeout,
+                                    depth=depth,
+                                    maxmoves=maxmoves,
+                                    random_moves=random_moves,
+                                    predefined_random_moves=result1.get("initial_moves"))
+            
+            self.results.append(result1)
+            self.results.append(result2)
             
             self.save_results()
             self.save_ratings()
