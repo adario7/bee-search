@@ -104,7 +104,6 @@ class Engine:
 
 
 def seconds_to_hh(seconds):
-
     time = int(seconds)
     s = time%60
     time //= 60
@@ -198,42 +197,55 @@ class HiveArena:
             self.elo_updater(match["white"], match["black"], match["winner"])
         self.save_ratings()
 
-    def get_match_counts(self):
-        """Count how many matches each engine has played"""
-        match_counts = {}
-        for engine_path in self.engine_paths:
-            engine_name = path_to_name(engine_path)
-            match_counts[engine_name] = 0
+    def get_pair_match_counts(self, engine_names):
+        """Count how many matches each pair of engines has played"""
+        pair_match_counts = {}
         
+        # Initialize counts for all possible pairs
+        for i in range(len(engine_names)):
+            for j in range(i + 1, len(engine_names)):
+                pair = tuple(sorted([engine_names[i], engine_names[j]]))
+                pair_match_counts[pair] = 0
+                
         for match in self.results:
             white_name = match["white"]
             black_name = match["black"]
-            if white_name in match_counts:
-                match_counts[white_name] += 1
-            if black_name in match_counts:
-                match_counts[black_name] += 1
-        
-        return match_counts
+            pair = tuple(sorted([white_name, black_name]))
+            if pair in pair_match_counts:
+                pair_match_counts[pair] += 1
+                
+        return pair_match_counts
 
     def select_engines_weighted(self):
-        """Select two engines with probability proportional to 1/(1 + matches_played)"""
-        match_counts = self.get_match_counts()
+        """Select a pair of engines with probability proportional to 1/(1 + matches_played_by_pair)"""
+        engine_names = [path_to_name(path) for path in self.engine_paths]
+        pair_match_counts = self.get_pair_match_counts(engine_names)
         
-        # Calculate weights for each engine
+        pairs = []
         weights = []
-        for engine_path in self.engine_paths:
-            engine_name = path_to_name(engine_path)
-            matches_played = match_counts.get(engine_name, 0)
-            weight = 1.0 / (1 + matches_played)
-            weights.append(weight)
         
+        name_to_path = {name: path for name, path in zip(engine_names, self.engine_paths)}
+        
+        for i in range(len(engine_names)):
+            for j in range(i + 1, len(engine_names)):
+                name_1, name_2 = engine_names[i], engine_names[j]
+                pair_tuple = tuple(sorted([name_1, name_2]))
+                matches_played = pair_match_counts.get(pair_tuple, 0)
+                pairs.append((name_1, name_2))
+                weights.append(1.0 / (1 + matches_played))
+                
         weights = np.array(weights)
-        weights = weights / weights.sum()  # normalize
+        if weights.sum() == 0:
+            weights = np.ones_like(weights) / len(weights)
+        else:
+            weights = weights / weights.sum()  # normalize
         
-        # Select two different engines
-        selected_indices = np.random.choice(len(self.engine_paths), size=2, replace=False, p=weights)
-        a, b = self.engine_paths[selected_indices[0]], self.engine_paths[selected_indices[1]]
-        if random.random() < 0.5: # avoid a new engine with high weight always being white/black
+        # Select a pair
+        selected_index = np.random.choice(len(pairs), p=weights)
+        selected_pair = pairs[selected_index]
+        
+        a, b = name_to_path[selected_pair[0]], name_to_path[selected_pair[1]]
+        if random.random() < 0.5: # randomly assign white/black
             a, b = b, a
         return a, b
 
@@ -455,7 +467,7 @@ if __name__ == '__main__':
     parser.add_argument("--results-folder", type=str, default="logs/", help="Folder where the matches are stored")
     parser.add_argument("--maxmoves", type=int, default=maxmoves, help="Maximum number of moves per match per engine")
     parser.add_argument("--random-moves", type=int, default=0, help="Number of initial random moves")
-    parser.add_argument("--continuous", action="store_true", help="Run continuously, reloading engine list after each match")
+    parser.add_argument("--all-v-all", action="store_true", help="Run all-vs-all once instead of continuous selection")
     
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--timeout", type=float, default=5, help="Time per move")
@@ -478,7 +490,7 @@ if __name__ == '__main__':
 
     arena = HiveArena(engine_paths, results_folder=args.results_folder)
     
-    if args.continuous:
+    if not args.all_v_all:
         arena.continuous_matches(engine_paths_file=args.engine_paths,
                                 update_elo=args.update_elo, 
                                 verbose=args.verbose, 
