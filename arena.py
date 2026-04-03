@@ -1,4 +1,3 @@
-from io import text_encoding
 import subprocess
 import threading
 import queue

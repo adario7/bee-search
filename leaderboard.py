@@ -3,10 +3,11 @@ import subprocess
 from pathlib import Path
 import chess.pgn
 from arena import load_engines_with_names
+import sys
 
 engine_paths, names = load_engines_with_names()
 name_to_stem = {n: Path(p).stem for p, n in zip(engine_paths, names)}
-target = "MzingaEngine v0.15.1"
+target = "nokamute 1.0.3-2-g806ba76"
 
 def full_name(name):
 	stem = name_to_stem.get(name)
@@ -27,7 +28,7 @@ with open('logs/results.json') as f, open('/tmp/games.pgn', 'w') as out:
 		out.write(str(g) + "\n")
 
 # https://github.com/michiguel/Ordo
-args = ["ordo","-p","/tmp/games.pgn","-a","0","-W","-D"]
+args = ["ordo","-p","/tmp/games.pgn","-a","0","-W","-D"] + sys.argv[1:]
 if target in names:
 	args += ["-A", full_name(target)]
 subprocess.run(args)

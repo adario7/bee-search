@@ -78,15 +78,39 @@ def get_positions_from_results(results_paths, engine):
     positions = set()
     winners = {}
     opp = {"white": "black", "black": "white"}
+    accepted_count = 0
+    discarded_count = 0
 
     for path in results_paths:
         print(f"Extracting positions from results in {path}...")
-        results = load_results(path)
+        
+        if path.endswith(".json"):
+            results = load_results(path)
+        else:
+            results = []
+            winner_map = {"WhiteWins": "white", "BlackWins": "black", "Draw": "draw"}
+            with open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    parts = line.split(";")
+                    if len(parts) >= 2 and parts[1] in winner_map:
+                        results.append({
+                            "winner": winner_map[parts[1]],
+                            "final_gamestate": line
+                        })
+                    else:
+                        discarded_count += 1
 
         for result in tqdm(results):
             tmp = result["final_gamestate"].split(";")
             winner = result["winner"]
 
+            if len(tmp) < 4 or tmp[0] != "Base+MLP":
+                discarded_count += 1
+                continue
+            
+            accepted_count += 1
             gametype = tmp[0]
             moves = tmp[3:]
 
@@ -110,6 +134,7 @@ def get_positions_from_results(results_paths, engine):
                 winners[position][relative] += 1
 
     positions = list(positions)
+    print(f"Accepted games: {accepted_count}, Discarded games: {discarded_count}")
     print(f"Extracted {len(positions)} positions.")
 
     win_prob = {}
@@ -249,7 +274,7 @@ def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluat
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Evaluate positions using the Hive engine.")
-    parser.add_argument("--results-paths", type=str, nargs="+", default=["logs/results.json"],
+    parser.add_argument("--results", type=str, nargs="+", default=["logs/results.json"],
                         help="List of result files.")
     parser.add_argument("--engine", type=str, default=default_engine_path,
                         help="Path to the Hive engine executable.")
@@ -257,32 +282,32 @@ if __name__ == "__main__":
                         help="Depth for engine evaluation.")
     parser.add_argument("--timeout", type=int, default=10,
                         help="Timeout for engine responses in seconds.")
-    parser.add_argument("--evals-path", type=str, default="logs/evaluations.json",
+    parser.add_argument("--evals", type=str, default="logs/evaluations.json",
                         help="Path to save the evaluations JSON file.")
     parser.add_argument("--reevaluate", action="store_true",
                         help="Re-evaluate positions if depth or engine name are different from the one we are using now.")
-    parser.add_argument("--global-features-path", type=str, default=None,
+    parser.add_argument("--global-features", type=str, default=None,
                         help="Path to save the global features JSON file.")
-    parser.add_argument("--graphs-path", type=str, default=None,
+    parser.add_argument("--graphs", type=str, default=None,
                         help="Path to save the graphs pickle file.")
 
     args = parser.parse_args()
 
     engine = Engine(args.engine)
-    positions, win_prob = get_positions_from_results(args.results_paths, engine)
+    positions, win_prob = get_positions_from_results(args.results, engine)
 
     current_engine_name = engine.name
 
     # Plan the evaluation run
-    positions_to_eval, evals_map = plan_evaluation_run(positions, args.evals_path, args.depth, current_engine_name, args.reevaluate)
+    positions_to_eval, evals_map = plan_evaluation_run(positions, args.evals, args.depth, current_engine_name, args.reevaluate)
 
     # update winners
     for pos in positions:
         if pos in evals_map:
             evals_map[pos]["winner"] = win_prob[pos]
-    with open(args.evals_path, "w") as f:
+    with open(args.evals, "w") as f:
         json.dump(list(evals_map.values()), f, indent=1)
-    print(f"Evaluations saved to {args.evals_path}")
+    print(f"Evaluations saved to {args.evals}")
 
     # Run evaluation on the filtered list
     if positions_to_eval:
@@ -297,25 +322,25 @@ if __name__ == "__main__":
                 e["winner"] = win_prob[e["position"]]
             processed += len(chunk)
             # Save after each chunk so we don't lose progress (including re-evaluations)
-            with open(args.evals_path, "w") as f:
+            with open(args.evals, "w") as f:
                 json.dump(list(evals_map.values()), f, indent=1)
-            print(f"Saved {len(evals_map)} evaluations to {args.evals_path} after processing {processed} positions")
+            print(f"Saved {len(evals_map)} evaluations to {args.evals} after processing {processed} positions")
     else:
         print("No new positions to evaluate.")
 
     # Save the consolidated list of all evaluations (old and new)
-    with open(args.evals_path, "w") as f:
+    with open(args.evals, "w") as f:
         json.dump(list(evals_map.values()), f, indent=1)
-    print(f"Evaluations saved to {args.evals_path}")
+    print(f"Evaluations saved to {args.evals}")
 
-    if args.global_features_path:
+    if args.global_features:
         global_features = get_global_features_from_positions(positions=positions, engine=engine)
-        with open(args.global_features_path, "w") as f:
+        with open(args.global_features, "w") as f:
             json.dump(global_features, f, indent=1)
 
-    if args.graphs_path:
+    if args.graphs:
         graphs = get_graph_from_positions(positions=positions, engine=engine)
-        with open(args.graphs_path, "wb") as f:
+        with open(args.graphs, "wb") as f:
             pickle.dump(graphs, f)
     
     engine.terminate()
