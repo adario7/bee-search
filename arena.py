@@ -61,9 +61,9 @@ class Engine:
             self.proc.stdin.write(text + "\n")
             self.proc.stdin.flush()
 
-    def command(self, text, timout=None):
+    def command(self, text, timeout=None):
         self.send(text)
-        return self.receive(timeout=timout)
+        return self.receive(timeout=timeout)
 
     def receive(self, timeout=None):
         lines = []

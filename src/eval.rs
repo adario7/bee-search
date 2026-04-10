@@ -7,12 +7,6 @@ pub const MLP_EVAL: bool = true;
 pub const FEATURES_EVAL: bool = true;
 
 impl Board {
-    #[cfg(feature = "gnn")]
-    pub fn gnn_eval(&mut self) -> Eval {
-        let graph = self.get_graph();
-        self.gnn.evaluate(&graph).unwrap_or(0.0) as Eval
-    }
-
     fn queen_score(&self) -> Eval {
         let color = self.color();
         match self.queens[color.index()] {
@@ -33,19 +27,11 @@ impl Board {
     }
     
     pub fn static_eval(&mut self) -> Eval {
-        #[cfg(feature = "gnn")]
-        {
-            return self.gnn_eval();
-        }
         let my_moves_n = self.generate_moves();
         self.static_eval_fast(&my_moves_n)
     }
 
     pub fn static_eval_fast(&mut self, my_moves: &Vec<Action>) -> Eval {
-        #[cfg(feature = "gnn")]
-        {
-            return self.gnn_eval();
-        }
         if MLP_EVAL {
             let f = self.features_fast(my_moves);
             Self::inference(&f)

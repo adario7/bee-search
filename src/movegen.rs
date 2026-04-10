@@ -956,6 +956,74 @@ impl Board {
         num
     }
 
+    pub fn generate_movements_by_tile(self: &mut Board) -> [u16; GRID_SIZE] {
+        let mut immovable = self.find_cut_vertexes();
+        let stunned = match self.turn_history.last() {
+            Some(Action::Move(_, dest)) => Some(*dest),
+            _ => None,
+        };
+        if let Some(moved) = stunned {
+            immovable.set(moved);
+        }
+
+        let mut num = [0; GRID_SIZE];
+        let mut num_ant = 0;
+
+        for hex in self.all_occupied_tiles() {
+            if stunned == Some(hex) {
+                continue;
+            }
+            if self.tile(hex).ptype() == Pct::Pillbug
+                || (self.tile(hex).ptype() == Pct::Mosquito
+                    && !self.is_stacked(hex)
+                    && adjacent(hex).iter().any(|&adj| {
+                        let n = self.tile(adj);
+                        n.is_some() && n.ptype() == Pct::Pillbug
+                    }))
+            {
+                num[hex as usize] += self.generate_throws_n(&immovable, hex) as u16;
+            }
+
+            if self.tile(hex).ptype() == Pct::Ant
+                || (self.tile(hex).ptype() == Pct::Mosquito
+                    && !self.is_stacked(hex)
+                    && adjacent(hex).iter().any(|&adj| {
+                        let n = self.tile(adj);
+                        n.is_some() && n.ptype() == Pct::Ant
+                    }))
+            {
+                num_ant += 1;
+            }
+        }
+
+        let cc_size = OnceCell::new();
+        let get_cc_size = || cc_size.get_or_init(|| self.generate_cc_slidable()); //size of connected component of slidable adjacent cells
+
+        for hex in self.all_occupied_tiles() {
+            let node = self.tile(hex);
+            let pct = node.ptype();
+            if self.is_stacked(hex) {
+                num[hex as usize] += self.generate_stack_walking_n(hex) as u16;
+                continue;
+            }
+            if immovable.get(hex) {
+                continue;
+            }
+            num[hex as usize] += match pct {
+                Pct::Queen => self.generate_walk1_n(hex),
+                Pct::Grasshopper => self.generate_jumps_n(hex),
+                Pct::Spider => self.generate_walk3_n(hex),
+                Pct::Ant => self.generate_walk_all_n(hex, get_cc_size, num_ant),
+                Pct::Beetle => self.generate_walk1_n(hex) + self.generate_stack_walking_n(hex),
+                Pct::Mosquito => self.generate_mosquito_n(hex, get_cc_size, num_ant),
+                Pct::Ladybug => self.generate_ladybug_n(hex),
+                Pct::Pillbug => self.generate_walk1_n(hex),
+            } as u16;
+        }
+
+        num
+    }
+
     pub fn generate_moves_n(self: &mut Board) -> usize {
         if !APPROX_MOVE_N {
             return self.generate_moves().len();

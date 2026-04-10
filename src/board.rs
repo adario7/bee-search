@@ -2,9 +2,6 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
-#[cfg(feature = "gnn")]
-use crate::graph_nn::GnnEvaluator;
-
 use crate::tile::{adjacent, Direction, Tile, GRID_SIZE};
 use crate::piece::{Color, Piece};
 use crate::piece_type::{Pct, PieceType};
@@ -13,9 +10,6 @@ use std::sync::OnceLock;
 
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
-
-#[cfg(feature = "gnn")]
-static GNN_PATH: &str = "models/hive_gnn.onnx";
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
@@ -60,9 +54,6 @@ pub struct Board {
     pub zobrist_table: &'static [u64; GRID_SIZE * 2],
     pub zobrist_hash: u64,
     pub zobrist_history: Vec<u64>,
-
-    #[cfg(feature = "gnn")]
-    pub gnn: std::sync::Arc<GnnEvaluator>,
 }
 
 pub const TOT_QTY: [u8; 8] = [1, 3, 2, 3, 2, 1, 1, 1];
@@ -107,8 +98,6 @@ impl Board {
             zobrist_table,
             zobrist_hash: 0,
             zobrist_history: Vec::new(),
-            #[cfg(feature = "gnn")]
-            gnn: std::sync::Arc::new(GnnEvaluator::new(GNN_PATH).expect("Failed to initialize GnnEvaluator")),
         }
     }
 
@@ -305,6 +294,10 @@ impl Board {
 
     pub fn get_cached_hash(&self) -> CacheHash {
         CacheHash {zobrist_hash: self.zobrist_hash, board_color: self.color()}
+    }
+
+    pub fn all_occupied_tiles(&self) -> impl Iterator<Item = Tile> + '_ {
+        self.occupied_tiles[self.color().index()].iter().copied().chain(self.occupied_tiles[self.color().other().index()].iter().copied())
     }
 }
 

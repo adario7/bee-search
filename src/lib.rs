@@ -11,5 +11,4 @@ pub mod eval;
 pub mod engine;
 pub mod tt;
 pub mod features;
-#[cfg(feature = "gnn")]
 pub mod graph_nn;

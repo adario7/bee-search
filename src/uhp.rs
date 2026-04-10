@@ -52,10 +52,6 @@ impl Uhp {
         let version = env!("CARGO_PKG_VERSION");
         let hash = env!("GIT_HASH");
         print!("id bee-search {}-{}", version, hash);
-        #[cfg(feature = "gnn")]
-        {
-            print!("-GNN");
-        }
         if MLP_EVAL { print!("-MLP"); }
         else if FEATURES_EVAL { print!("-F"); }
         if FORCE_ST { print!("-ST"); }
@@ -182,15 +178,10 @@ impl Uhp {
         Ok(())
     }
 
-    #[cfg(feature = "gnn")]
     fn print_graph(&self) -> UhpResult<()> {
-        use crate::piece::Piece;
-
-        let graph = self.board.get_graph();
-        println!("{} ", graph.nodes.len());
-        for node in &graph.nodes {
-            println!("{} ", node);
-        }
+        let mut board = self.board.clone();
+        let graph = board.get_graph();
+        println!("{} ", graph.features.len());
         for feature in &graph.features {
             for f in feature {
                 print!("{} ", f);
@@ -199,27 +190,7 @@ impl Uhp {
         }
         println!("{}", graph.edges.len());
         for i in 0..graph.edges.len() {
-            for j in 0..graph.edges[i].len() {
-                print!("{} ", graph.edges[i][j] as u8);
-            }
-            println!()
-        }
-
-        // Additional features
-
-        for node in &graph.nodes {
-            println!("{} ", self.board.height(*node));
-            if self.board.tile(*node) == Piece::empty() {
-                continue;
-            }
-
-            println!("{} {} ",self.board.tile(*node).color().index() ^ self.board.color().index(), self.board.tile(*node).ptype().index());
-
-            if let Some(underworld) = self.board.underworld.get(node) {
-                for piece in underworld {
-                    println!("{} {} ", piece.color().index() ^ self.board.color().index(), piece.ptype().index());
-                }
-            }
+            println!("{} {} {}", graph.edges[i][0], graph.edges[i][1], graph.edges[i][2]);
         }
         Ok(())
     }
@@ -255,7 +226,6 @@ impl Uhp {
             // secret commands
             "perft" => self.perft(args),
             "eval" => self.eval(args),
-            #[cfg(feature = "gnn")]
             "graph" => self.print_graph(),
             "features" => self.features(),
             "static_eval" => self.static_eval(),
