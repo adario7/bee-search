@@ -102,7 +102,7 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads);
+        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads, true);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -172,7 +172,7 @@ impl Uhp {
         let score = if depth == 0 {
             self.board.static_eval()
         } else {
-            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads).0
+            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, true).0
         };
         println!("{}", score);
         Ok(())

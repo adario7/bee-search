@@ -112,7 +112,7 @@ fn main() {
                 let max_time_per_move = Duration::from_secs(3600); // 1 hour, effectively unlimited for depth search
                 // This call is primarily for timing and exercising the engine/TT logic.
                 // The engine's internal eprintln will still show computed best move info [cite: 117]
-                let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1); 
+                let _computed_best_action = engine.clone().best_move(&mut board, args.d, max_time_per_move, 1, true); 
                 let think_time = start_time.elapsed();
                 total_think_time += think_time;
                 total_nodes += engine.last_nnodes();
