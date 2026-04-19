@@ -501,7 +501,7 @@ impl Engine {
         Some(0)
     }
 
-    fn iterative_deepening(&self, td: &mut ThreadData, max_depth: Depth) {
+    fn iterative_deepening(&self, td: &mut ThreadData, max_depth: Depth, verbose: bool) {
         for depth in 1..=max_depth {
             let start = Instant::now();
             let score = self.aspiration_search(td, depth);
@@ -510,29 +510,30 @@ impl Engine {
                 break;
             }
 
-            let mut prev = td.completed_depth.load(atomic::Ordering::Relaxed);
-            while depth > prev {
-                match td.completed_depth.compare_exchange(prev, depth, atomic::Ordering::SeqCst, atomic::Ordering::Relaxed) {
-                    Ok(_) => {
-                        if let Some(entry) = option {
-                            let score = score.unwrap();
-                            let elapsed = start.elapsed();
-                            let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
-                            eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, display_eval(score), td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
-                        } else {
-                            eprintln!("[#{}] depth {}: could not find matching tt entry", td.id, depth);
+            if verbose {
+                let mut prev = td.completed_depth.load(atomic::Ordering::Relaxed);
+                while depth > prev {
+                    match td.completed_depth.compare_exchange(prev, depth, atomic::Ordering::SeqCst, atomic::Ordering::Relaxed) {
+                        Ok(_) => {
+                            if let Some(entry) = option {
+                                let score = score.unwrap();
+                                let elapsed = start.elapsed();
+                                let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
+                                eprintln!("[#{}] depth {}: score={}, move={}, nodes={}, time={}ms", td.id, depth, display_eval(score), td.board.action_to_string(entry.pv), nnodes, elapsed.as_millis());
+                            } else {
+                                eprintln!("[#{}] depth {}: could not find matching tt entry", td.id, depth);
+                            }
+                            break;
                         }
-                        break;
+                        Err(actual) => prev = actual,
                     }
-                    Err(actual) => prev = actual,
                 }
             }
-
         }
         td.abort.store(true, atomic::Ordering::Relaxed);
     }
 
-    fn lazy_smp(self: Arc<Self>, board: &mut Board, max_depth: Depth, deadline: Instant, num_threads: usize) -> (Value, Action) {
+    fn lazy_smp(self: Arc<Self>, board: &mut Board, max_depth: Depth, deadline: Instant, num_threads: usize, verbose: bool) -> (Value, Action) {
         self.tt.clear_one(board.zobrist_hash); // make sure the root TT slot is available
 
         // reset move votes
@@ -561,7 +562,7 @@ impl Engine {
                         local_nodes: 0,
                         last_vote: None,
                     };
-                    th_engine.iterative_deepening(&mut td, max_depth);
+                    th_engine.iterative_deepening(&mut td, max_depth, verbose);
                 });
             }
         })
@@ -574,28 +575,32 @@ impl Engine {
             .map(|m| (m, self.move_votes[Self::vote_index(m)].load(atomic::Ordering::Relaxed)))
             .collect();
         root_votes.sort_by_key(|(_, cnt)| -(*cnt as i64));
-        let tot_votes = root_votes.iter().map(|(_, cnt)| *cnt).sum::<u64>();
-        eprint!("Votes: ");
-        for &(mv, cnt) in &root_votes {
-            if cnt == 0 { continue; }
-            let pct = 100.0 * cnt as f64 / tot_votes as f64;
-            eprint!("{}={:.1}% ", board.action_to_string(mv), pct);
+        if verbose {
+            let tot_votes = root_votes.iter().map(|(_, cnt)| *cnt).sum::<u64>();
+            eprint!("Votes: ");
+            for &(mv, cnt) in &root_votes {
+                if cnt == 0 { continue; }
+                let pct = 100.0 * cnt as f64 / tot_votes as f64;
+                eprint!("{}={:.1}% ", board.action_to_string(mv), pct);
+            }
+            eprintln!();
         }
-        eprintln!();
         let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::Pass);
         (value, best_move)
     }
 
-    pub fn best_move(self: Arc<Self>, board: &mut Board, max_depth: Depth, max_time: Duration, num_threads: usize) -> (Value, Action) {
+    pub fn best_move(self: Arc<Self>, board: &mut Board, max_depth: Depth, max_time: Duration, num_threads: usize, verbose: bool) -> (Value, Action) {
         let start = Instant::now();
         self.nnodes.store(0, atomic::Ordering::Relaxed);
         self.qsnodes.store(0, atomic::Ordering::Relaxed);
         let deadline = start + max_time;
-        let r = self.clone().lazy_smp(board, max_depth, deadline, num_threads);
+        let r = self.clone().lazy_smp(board, max_depth, deadline, num_threads, verbose);
         let elapsed = start.elapsed().as_secs_f64();
         let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
         let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);
-        eprintln!("[{} th] explored {} nodes in {:.4}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
+        if verbose {
+            eprintln!("[{} th] explored {} nodes in {:.4}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
+        }
         r
     }
 
