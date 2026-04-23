@@ -69,6 +69,16 @@ def metrics(y_true, y_pred):
 		"r2": float(r2_score(y_true, y_pred))
 	}
 
+def count_stats(model):
+	params = sum(p.numel() for p in model.parameters())
+	flops = 0
+	for layer in model.net:
+		if isinstance(layer, nn.Linear):
+			flops += layer.in_features * layer.out_features * 2
+			if layer.bias is not None:
+				flops += layer.out_features
+	return params, flops
+
 if __name__ == "__main__":
 	p = argparse.ArgumentParser()
 	p.add_argument("--evals", default="logs/evaluations.json")
@@ -109,9 +119,8 @@ if __name__ == "__main__":
 
 	# symmetric augmentation approach:
 	L = X_full.shape[1]
-	if L % 2 != 0:
-		raise ValueError("Feature vector length must be even for symmetric mode")
-	N = L // 2
+	ADJ = 128
+	N = (L - ADJ) // 2
 
 	def augment_indices(indices):
 		X_aug = []
@@ -131,13 +140,13 @@ if __name__ == "__main__":
 			w_aug.append(w)
 			static_aug.append(None if s is None else float(s))
 			pos_aug.append(pos)
-			# swapped counterpart
-			f_swapped = np.concatenate([f[N:], f[:N]])
-			X_aug.append(f_swapped)
-			y_aug.append(-y)
-			w_aug.append(1.0 - w)
-			static_aug.append(None if s is None else -float(s))
-			pos_aug.append(pos + "_sym")  # mark as different to avoid accidental joins
+			if False: # TODO: invert adjacency matrix
+				f_swapped = np.concatenate([f[N:2*N], f[:N], f[2*N:]])
+				X_aug.append(f_swapped)
+				y_aug.append(-y)
+				w_aug.append(1.0 - w)
+				static_aug.append(None if s is None else -float(s))
+				pos_aug.append(pos + "_sym")  # mark as different to avoid accidental joins
 		return np.vstack(X_aug), np.array(y_aug), np.array(w_aug, dtype=float), np.array(static_aug, dtype=object), pos_aug
 
 	X_train_aug, y_train_aug, winner_train_aug, static_train_aug, pos_train_aug = augment_indices(idx_train)
@@ -179,11 +188,11 @@ if __name__ == "__main__":
 
 		coeffs = model.coef_.astype(float)
 		w1 = coeffs[:N]
-		w2 = coeffs[N:]
+		w2 = coeffs[N:2*N]
+		w_adj = coeffs[2*N:]
 		symmetry_err = np.max(np.abs(w2 + w1))
 		print("\nLinear model parameters (full-length coeffs):")
 		print("Intercept: 0.0 (enforced)")
-		print("Coefficients (length 2N):", list(map(float, coeffs)))
 		print(f"Max |w2 + w1| (symmetry check): {symmetry_err:.6g}")
 		print("Reduced weights (first-half, equivalent to model on (first-half - second-half)):")
 		print(list(map(float, w1)))
@@ -211,12 +220,28 @@ if __name__ == "__main__":
 		def forward(self, x):
 			return self.net(x)
 
+	class AdjMLP(nn.Module):
+		def __init__(self, n_in, out_dim):
+			super().__init__()
+			self.net = nn.Sequential(
+				nn.Linear(n_in, 8),
+				nn.ReLU(),
+				nn.Linear(8, 6),
+				nn.ReLU(),
+				nn.Linear(6, out_dim),
+				nn.ReLU()
+			)
+		def forward(self, x):
+			return self.net(x)
+
 	class FinalMLP(nn.Module):
 		def __init__(self, in_dim):
 			super().__init__()
 			# output two values: [eval_raw, winner_raw]
 			self.net = nn.Sequential(
-				nn.Linear(in_dim, 8),
+				nn.Linear(in_dim, 10),
+				nn.ReLU(),
+				nn.Linear(10, 8),
 				nn.ReLU(),
 				nn.Linear(8, 6),
 				nn.ReLU(),
@@ -230,21 +255,43 @@ if __name__ == "__main__":
 			winner_out = torch.sigmoid(out[:, 1])
 			return eval_out, winner_out
 
-	mid_half_dim = 6
-	shared = HalfMLP(N, out_dim=mid_half_dim).to(device)
-	final = FinalMLP(in_dim=mid_half_dim*2).to(device)
+	mid_half_dim = 8
+	mid_adj_dim = 6
+	shared1 = HalfMLP(N, out_dim=mid_half_dim).to(device)
+	shared2 = HalfMLP(N, out_dim=mid_half_dim).to(device)
+	adj_net = AdjMLP(ADJ, out_dim=mid_adj_dim).to(device)
+	final = FinalMLP(in_dim=mid_half_dim*2 + mid_adj_dim).to(device)
 
 	if args.load_ckpt:
 		if os.path.exists(args.load_ckpt):
 			ckpt = torch.load(args.load_ckpt, map_location=device)
-			shared.load_state_dict(ckpt['shared'])
+			shared1.load_state_dict(ckpt['shared1'])
+			shared2.load_state_dict(ckpt['shared2'])
+			adj_net.load_state_dict(ckpt['adj_net'])
 			final.load_state_dict(ckpt['final'])
 			print(f"Loaded checkpoint from {args.load_ckpt}")
 		else:
 			print(f"Warning: checkpoint not found at {args.load_ckpt}")
 
-	all_params = list(shared.parameters()) + list(final.parameters())
-	print("Total parameters:", sum(p.numel() for p in all_params))
+	s1_p, s1_f = count_stats(shared1)
+	s2_p, s2_f = count_stats(shared2)
+	adj_p, adj_f = count_stats(adj_net)
+	f_p, f_f = count_stats(final)
+
+	p_total = s1_p + s2_p + adj_p + f_p
+	f_total = s1_f + s2_f + adj_f + f_f
+
+	print("\nModel Architecture Summary:")
+	print(f"{'Section':<10} | {'Parameters':>12} | {'FLOPs':>12}")
+	print("-" * 40)
+	print(f"{'Player':<10} | {s1_p + s2_p:>12,} | {s1_f + s2_f:>12,}")
+	print(f"{'Adj':<10} | {adj_p:>12,} | {adj_f:>12,}")
+	print(f"{'Final':<10} | {f_p:>12,} | {f_f:>12,}")
+	print("-" * 40)
+	print(f"{'Total':<10} | {p_total:>12,} | {f_total:>12,}")
+	print()
+	
+	all_params = list(shared1.parameters()) + list(shared2.parameters()) + list(adj_net.parameters()) + list(final.parameters())
 	optimizer = torch.optim.Adam(all_params, lr=args.mlp_lr)
 	loss_fn_eval = nn.MSELoss()
 	loss_fn_winner = nn.BCELoss()
@@ -267,19 +314,18 @@ if __name__ == "__main__":
 	best_epoch = -1
 	history = {'train_loss': [], 'test_loss': []}
 
-	shared.train(); final.train()
+	shared1.train(); shared2.train(); adj_net.train(); final.train()
 	for epoch in range(args.mlp_epochs):
 		running_eval_loss = 0.0
-		running_eval_mae = 0.0
 		running_winner_loss = 0.0
-		running_winner_mae = 0.0
 		running_reg_loss = 0.0
 		running_total_loss = 0.0
 		total = 0
 		for xb, yb, wb in train_loader:
 			xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
-			h1 = shared(xb[:, :N]); h2 = shared(xb[:, N:])
-			conc = torch.cat([h1, h2], dim=1)
+			h1 = shared1(xb[:, :N]); h2 = shared2(xb[:, N:2*N])
+			h_adj = adj_net(xb[:, 2*N:])
+			conc = torch.cat([h1, h2, h_adj], dim=1)
 			pred_eval, pred_winner = final(conc)
 			loss_eval = loss_fn_eval(pred_eval/args.clip, yb/args.clip)
 			loss_winner = lambda_w * loss_fn_winner(pred_winner, wb)
@@ -288,27 +334,24 @@ if __name__ == "__main__":
 			optimizer.zero_grad(); loss.backward(); optimizer.step()
 			bs = xb.size(0)
 			running_eval_loss += loss_eval.item() * bs
-			running_eval_mae += (pred_eval - yb).abs().sum().item()
 			running_winner_loss += loss_winner.item() * bs
-			running_winner_mae += (pred_winner - wb).abs().sum().item()
 			running_reg_loss += l2_reg.item() * bs
 			running_total_loss += loss.item() * bs
 			total += bs
 		train_eval_loss = running_eval_loss / total
-		train_eval_mae = running_eval_mae / total
 		train_winner_loss = running_winner_loss / total
-		train_winner_mae = running_winner_mae / total
 		train_reg_loss = running_reg_loss / total
 		train_total_loss = running_total_loss / total
 
-		shared.eval(); final.eval()
+		shared1.eval(); shared2.eval(); adj_net.eval(); final.eval()
 		with torch.no_grad():
 			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device); Wte_dev = Wte.to(device)
-			h1 = shared(Xte_dev[:, :N]); h2 = shared(Xte_dev[:, N:])
-			conc = torch.cat([h1, h2], dim=1)
+			h1 = shared1(Xte_dev[:, :N]); h2 = shared2(Xte_dev[:, N:2*N])
+			h_adj = adj_net(Xte_dev[:, 2*N:])
+			conc = torch.cat([h1, h2, h_adj], dim=1)
 			val_eval_pred, val_winner_pred = final(conc)
 			val_eval_loss = loss_fn_eval(val_eval_pred/args.clip, Yte_dev/args.clip).item()
-			val_eval_mae = (val_eval_pred - Yte_dev).abs().mean().item()
+			val_eval_rmse = (val_eval_pred - Yte_dev).pow(2).mean().item()**0.5
 			val_winner_loss = lambda_w * loss_fn_winner(val_winner_pred, Wte_dev).item()
 			val_winner_mae = (val_winner_pred - Wte_dev).abs().mean().item()
 			val_l2_reg = l2_coef * sum(p.pow(2).sum() for p in all_params).item()
@@ -319,22 +362,26 @@ if __name__ == "__main__":
 				best_val_loss = val_eval_loss
 				best_epoch = epoch + 1
 				best_state = {
-					'shared': {k: v.cpu().clone() for k, v in shared.state_dict().items()},
+					'shared1': {k: v.cpu().clone() for k, v in shared1.state_dict().items()},
+					'shared2': {k: v.cpu().clone() for k, v in shared2.state_dict().items()},
+					'adj_net': {k: v.cpu().clone() for k, v in adj_net.state_dict().items()},
 					'final': {k: v.cpu().clone() for k, v in final.state_dict().items()}
 				}
 		
 		history['train_loss'].append(train_total_loss)
 		history['test_loss'].append(val_total_loss)
 
-		shared.train(); final.train()
+		shared1.train(); shared2.train(); adj_net.train(); final.train()
 		print(
 			f"Epoch {epoch+1}/{args.mlp_epochs} | "
-			f"TRAIN eval={train_eval_mae:.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
-			f"TEST  eval={val_eval_mae:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}={100*val_eval_loss:.4f}+{100*val_winner_loss:.4f}+{100*val_reg_loss:.4f}"
+			f"TRAIN loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
+			f"TEST  eval={val_eval_rmse:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}"
 		)
 
 	if best_state is not None:
-		shared.load_state_dict({k: v.to(device) for k, v in best_state['shared'].items()})
+		shared1.load_state_dict({k: v.to(device) for k, v in best_state['shared1'].items()})
+		shared2.load_state_dict({k: v.to(device) for k, v in best_state['shared2'].items()})
+		adj_net.load_state_dict({k: v.to(device) for k, v in best_state['adj_net'].items()})
 		final.load_state_dict({k: v.to(device) for k, v in best_state['final'].items()})
 		
 		# Save best model
@@ -354,12 +401,13 @@ if __name__ == "__main__":
 	plt.savefig("logs/training_loss.png")
 	print("\nLoss plot saved to logs/training_loss.png")
 
-	shared.eval(); final.eval()
+	shared1.eval(); shared2.eval(); adj_net.eval(); final.eval()
 	with torch.no_grad():
 		Xte_dev = Xte.to(device)
-		h1 = shared(Xte_dev[:, :N])
-		h2 = shared(Xte_dev[:, N:])
-		conc = torch.cat([h1, h2], dim=1)
+		h1 = shared1(Xte_dev[:, :N])
+		h2 = shared2(Xte_dev[:, N:2*N])
+		h_adj = adj_net(Xte_dev[:, 2*N:])
+		conc = torch.cat([h1, h2, h_adj], dim=1)
 		eval_preds, winner_preds = final(conc)
 		mlp_preds = eval_preds.cpu().numpy()
 
@@ -372,41 +420,49 @@ if __name__ == "__main__":
 	print(f"  R2:   {mlp_metrics['r2']:.4f}")
 
 	print()
-	params = list(chain(shared.named_parameters(), final.named_parameters()))
+	models_to_export = [
+		("P1", shared1),
+		("P2", shared2),
+		("A", adj_net),
+		("F", final)
+	]
 
 	rust_out_path = "logs/eval_mlp.rs"
 	with open(rust_out_path, "w") as f:
-		next_layer = 0
-		last_bias_layer = None
-		for name, p in params:
-			arr = p.detach().cpu().numpy()
-			is_final_last_w = name.endswith("net.4.weight")
-			is_final_last_b = name.endswith("net.4.bias")
-			if arr.ndim == 2:
-				# if this is the final layer producing 2 outputs, keep only the first row (eval head)
-				if is_final_last_w and arr.shape[0] == 2:
-					arr_print = arr[0:1, :]
-				else:
-					arr_print = arr
-				r, c = arr_print.shape
-				ident = f"W{next_layer}{next_layer+1}"
-				rows = []
-				for row in arr_print:
-					rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
-				body = "[\n  " + ",\n  ".join(rows) + "\n]"
-				f.write(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n\n")
-				last_bias_layer = next_layer + 1
-				next_layer += 1
-			elif arr.ndim == 1:
-				# if this is the final bias for the 2-output layer, keep only the first element
-				if is_final_last_b and arr.shape[0] == 2:
-					arr_print = arr[:1]
-				else:
-					arr_print = arr
-				n = arr_print.shape[0]
-				layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
-				ident = f"B{layer_idx}"
-				body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr_print) + "]"
-				f.write(f"\tconst {ident}: [f32; {n}] = {body};\n\n")
+		for prefix, model in models_to_export:
+			next_layer = 0
+			last_bias_layer = None
+			for name, p in model.named_parameters():
+				arr = p.detach().cpu().numpy()
+				# Last layer of 'F' is net.6 (linear layers at 0, 2, 4, 6)
+				is_final_last_w = (prefix == "F" and name.endswith("net.6.weight"))
+				is_final_last_b = (prefix == "F" and name.endswith("net.6.bias"))
+				
+				if arr.ndim == 2:
+					# if this is the final layer producing 2 outputs, keep only the first row (eval head)
+					if is_final_last_w and arr.shape[0] == 2:
+						arr_print = arr[0:1, :]
+					else:
+						arr_print = arr
+					r, c = arr_print.shape
+					ident = f"{prefix}_W{next_layer}{next_layer+1}"
+					rows = []
+					for row in arr_print:
+						rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
+					body = "[\n  " + ",\n  ".join(rows) + "\n]"
+					f.write(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n\n")
+					last_bias_layer = next_layer + 1
+					next_layer += 1
+				elif arr.ndim == 1:
+					# if this is the final bias for the 2-output layer, keep only the first element
+					if is_final_last_b and arr.shape[0] == 2:
+						arr_print = arr[:1]
+					else:
+						arr_print = arr
+					n = arr_print.shape[0]
+					layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
+					ident = f"{prefix}_B{layer_idx}"
+					body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr_print) + "]"
+					f.write(f"\tconst {ident}: [f32; {n}] = {body};\n\n")
 	
 	print(f"Rust weights written to {rust_out_path}")

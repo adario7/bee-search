@@ -47,12 +47,10 @@ def load_graphs(path):
 
 def load_features(path):
     data = load_json(path)
-    if isinstance(data, dict):
-        return {k: np.array(v, dtype=float) for k, v in data.items()}
-    elif isinstance(data, list):
-        return {rec["position"]: np.array(rec["features"], dtype=float) for rec in data if "position" in rec and "features" in rec}
-    else:
-        raise ValueError("Unsupported features format")
+    assert isinstance(data, list)
+    # load only first 72 features as adjecency matrix is a nightmare to invert
+    return {rec["position"]: np.array(rec["features"][:72], dtype=float)
+        for rec in data if "position" in rec and "features" in rec}
 
 def load_static(path):
     if not os.path.exists(path):
@@ -78,32 +76,48 @@ def estimate_flops_gnn(model, args):
     total_m_ops = 0
     constant_ops = 0
 
+    nd = model.node_dim
+    qd = model.queen_dim
+
+    if hasattr(model, 'pct_embed') and model.pct_embed is not None:
+        # Input embedding addition (per node: node_dim add, queens: queen_dim)
+        total_n_ops += nd
+        constant_ops += 2 * (qd - nd)  # 2 queen nodes get extra dims
+
     for layer in model.layers:
-        in_d = layer.in_dim
-        out_d = layer.out_dim
-        
-        n_ops = in_d * out_d * 2 + out_d + out_d
-        m_ops = out_d
+        # msg proj (per node): node_dim -> node_dim
+        n_ops = nd * nd * 2 + nd
+
+        # queen up/down msg projections
+        constant_ops += 2 * (qd * nd * 2 + nd)  # down
+        constant_ops += 2 * (nd * qd * 2 + qd)  # up
+
+        # self proj: normal nodes use node_dim x node_dim, queens use queen_dim x queen_dim
+        if getattr(layer, 'use_self_proj', False):
+            n_ops += nd * nd * 2 + nd  # per normal node
+            queen_extra = (qd * qd * 2 + qd) - (nd * nd * 2 + nd)
+            constant_ops += 2 * queen_extra  # 2 queens get extra cost
+
+        # relu + residual add (per node: node_dim, queens: queen_dim)
+        n_ops += nd
+        constant_ops += 2 * (qd - nd)
+
+        m_ops = nd  # scatter_add in node_dim
         if getattr(layer, 'use_pct_proj', False):
-            m_ops += out_d * out_d * 2
+            m_ops += nd * nd * 2
         elif getattr(layer, 'use_pct_reweight', False):
-            m_ops += out_d
+            m_ops += nd
         elif getattr(layer, 'use_attention', False):
-            m_ops += (out_d * 2 * 2) + 3
+            m_ops += (nd * 5) + 3
             
         if getattr(layer, 'use_pct_bias', False):
-            m_ops += out_d
+            m_ops += nd
             
-        # Edge category bias (7 directions + self loop)
-        m_ops += out_d
+        # Edge category bias
+        m_ops += nd
             
         total_n_ops += n_ops
         total_m_ops += m_ops
-
-    if hasattr(model, 'pool_proj') and model.pool_proj is not None:
-        pool_in_d = model.pool_proj.shape[1]
-        pool_out_d = model.pool_proj.shape[2]
-        total_n_ops += pool_in_d * pool_out_d * 2
 
     for layer in model.mlp:
         if isinstance(layer, nn.Linear):
@@ -173,51 +187,95 @@ def collate_graphs(batch):
     
     return batched_nodes, batched_edges, y, w, batch_idx, s, f
 
-class CustomGATLayer(nn.Module):
-    def __init__(self, in_dim, out_dim, num_categories=16, use_softmax=False, use_attention=False, use_pct_proj=False, use_pct_reweight=False, use_pct_bias=False):
+class CustomGnnLayer(nn.Module):
+    def __init__(self, node_dim, queen_dim, queen_cats=(0, 8), num_categories=16, use_softmax=False, use_attention=False, use_pct_proj=False, use_pct_reweight=False, use_pct_bias=False, use_pct_layers=False, use_self_proj=False):
         super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
+        self.node_dim = node_dim
+        self.queen_dim = queen_dim
+        self.queen_cats = set(queen_cats)
         self.num_categories = num_categories
         self.use_softmax = use_softmax
         self.use_attention = use_attention
         self.use_pct_proj = use_pct_proj
         self.use_pct_reweight = use_pct_reweight
         self.use_pct_bias = use_pct_bias
+        self.use_pct_layers = use_pct_layers
         
-        self.W_proj = nn.Parameter(torch.Tensor(num_categories, in_dim, out_dim))
+        # Message projection operates on node_dim features
+        # Queen specific projections to bridge queen_dim and node_dim for msg passing
+        self.W_down_queen = nn.Parameter(torch.Tensor(queen_dim, node_dim))
+        self.B_down_queen = nn.Parameter(torch.Tensor(node_dim))
+        nn.init.xavier_uniform_(self.W_down_queen)
+        nn.init.zeros_(self.B_down_queen)
+        
+        self.W_up_queen = nn.Parameter(torch.Tensor(node_dim, queen_dim))
+        self.B_up_queen = nn.Parameter(torch.Tensor(queen_dim))
+        nn.init.xavier_uniform_(self.W_up_queen)
+        nn.init.zeros_(self.B_up_queen)
+
+        if use_pct_layers:
+            self.W_proj = nn.Parameter(torch.Tensor(num_categories, node_dim, node_dim))
+            self.B_proj = nn.Parameter(torch.Tensor(num_categories, node_dim))
+        else:
+            self.W_proj = nn.Parameter(torch.Tensor(node_dim, node_dim))
+            self.B_proj = nn.Parameter(torch.Tensor(node_dim))
+            
         nn.init.xavier_uniform_(self.W_proj)
-        
-        self.B_proj = nn.Parameter(torch.Tensor(num_categories, out_dim))
         nn.init.zeros_(self.B_proj)
 
         if use_attention:
-            self.a_attn = nn.Parameter(torch.Tensor(num_categories, out_dim * 2, 1))
+            self.a_attn = nn.Parameter(torch.Tensor(num_categories, node_dim * 2, 1))
             nn.init.xavier_uniform_(self.a_attn)
             
         if use_pct_proj:
-            self.W_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, out_dim, out_dim))
+            self.W_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, node_dim, node_dim))
             nn.init.xavier_uniform_(self.W_msg)
             
         if use_pct_reweight:
-            self.V_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, out_dim))
+            self.V_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, node_dim))
             nn.init.xavier_uniform_(self.V_msg)
 
         if use_pct_bias:
-            self.B_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, out_dim))
+            self.B_msg = nn.Parameter(torch.Tensor(num_categories, num_categories, node_dim))
             nn.init.zeros_(self.B_msg)
 
-        self.B_edge = nn.Parameter(torch.Tensor(7, out_dim)) # 0-5 directions, 6 underworld
+        self.B_edge = nn.Parameter(torch.Tensor(7, node_dim)) # 0-5 directions, 6 underworld
         nn.init.zeros_(self.B_edge)
+        
+        self.use_self_proj = use_self_proj
+        if use_self_proj:
+            # Queens: queen_dim -> queen_dim
+            self.W_self_queen = nn.Parameter(torch.Tensor(queen_dim, queen_dim))
+            self.B_self_queen = nn.Parameter(torch.Tensor(queen_dim))
+            nn.init.xavier_uniform_(self.W_self_queen)
+            nn.init.zeros_(self.B_self_queen)
+            # Normal: node_dim -> node_dim
+            self.W_self_normal = nn.Parameter(torch.Tensor(node_dim, node_dim))
+            self.B_self_normal = nn.Parameter(torch.Tensor(node_dim))
+            nn.init.xavier_uniform_(self.W_self_normal)
+            nn.init.zeros_(self.B_self_normal)
         
     def forward(self, x, edges):
         cat = x[:, 0].long()
-        feat = x[:, 1:]
+        feat = x[:, 1:]  # (N, queen_dim)
         N = feat.size(0)
+        is_queen = (cat == 0) | (cat == 8)
+        normal_mask = ~is_queen
         
-        W = self.W_proj[cat] 
-        B = self.B_proj[cat]
-        z = torch.bmm(feat.unsqueeze(1), W).squeeze(1) + B
+        # Message projection: down project queens to node_dim
+        feat_msg = torch.zeros(N, self.node_dim, device=x.device)
+        if is_queen.any():
+            feat_msg[is_queen] = torch.matmul(feat[is_queen], self.W_down_queen) + self.B_down_queen
+        if normal_mask.any():
+            feat_msg[normal_mask] = feat[normal_mask, :self.node_dim]
+
+        if self.use_pct_layers:
+            W = self.W_proj[cat] 
+            B = self.B_proj[cat]
+            z = torch.bmm(feat_msg.unsqueeze(1), W).squeeze(1) + B
+        else:
+            z = torch.matmul(feat_msg, self.W_proj) + self.B_proj
+        # z is (N, node_dim)
         
         src, dst, edge_cat = edges[0], edges[1], edges[2]
         cat_src = cat[src]
@@ -254,47 +312,72 @@ class CustomGATLayer(nn.Module):
         else:
             msg = z_src
         
-        h_prime = torch.zeros(N, self.out_dim, device=x.device)
-        h_prime.scatter_add_(0, dst.unsqueeze(-1).expand_as(msg), msg)
-            
-        # self loop / residual connection
-        h_prime = z + h_prime
+        # Aggregate messages in node_dim, then pad to queen_dim
+        msg_sum_nd = torch.zeros(N, self.node_dim, device=x.device)
+        msg_sum_nd.scatter_add_(0, dst.unsqueeze(-1).expand_as(msg), msg)
         
-        h_prime = torch.relu(h_prime)
+        # up project queens back to queen_dim
+        msg_sum = torch.zeros(N, self.queen_dim, device=x.device)
+        if is_queen.any():
+            msg_sum[is_queen] = torch.matmul(msg_sum_nd[is_queen], self.W_up_queen) + self.B_up_queen
+        if normal_mask.any():
+            msg_sum[normal_mask, :self.node_dim] = msg_sum_nd[normal_mask]
+            
+        # self loop
+        if self.use_self_proj:
+            is_queen = (cat == 0) | (cat == 8)
+            z_self = torch.zeros(N, self.queen_dim, device=x.device)
+            if is_queen.any():
+                feat_q = feat[is_queen]
+                z_self[is_queen] = torch.matmul(feat_q, self.W_self_queen) + self.B_self_queen
+            normal_mask = ~is_queen
+            if normal_mask.any():
+                feat_n = feat[normal_mask, :self.node_dim]
+                z_self[normal_mask, :self.node_dim] = torch.matmul(feat_n, self.W_self_normal) + self.B_self_normal
+            msg_sum += z_self
+
+        h_prime = torch.relu(feat + msg_sum)
         
         out = torch.cat([cat.unsqueeze(1).float(), h_prime], dim=1)
         return out
 
 class GNNModel(nn.Module):
-    def __init__(self, feat_dim, gnn_in_dim=3, h_layers=[4,4,6,6], pk=6, use_softmax=False, use_attention=False, use_pct_proj=False, use_pct_reweight=False, use_pct_bias=False):
+    def __init__(self, feat_dim, gnn_in_dim=3, num_layers=3, node_dim=4, queen_dim=12, use_softmax=False, use_attention=False, use_pct_proj=False, use_pct_reweight=False, use_pct_bias=False, use_pct_layers=False, use_pct_embeddings=False, use_self_proj=False):
         super().__init__()
         self.use_softmax = use_softmax
         self.use_attention = use_attention
         self.use_pct_proj = use_pct_proj
         self.use_pct_reweight = use_pct_reweight
         self.use_pct_bias = use_pct_bias
+        self.use_pct_layers = use_pct_layers
+        self.use_pct_embeddings = use_pct_embeddings
+        self.use_self_proj = use_self_proj
+        self.node_dim = node_dim
+        self.queen_dim = queen_dim
         
+        if use_pct_embeddings:
+            self.pct_embed = nn.Embedding(16, queen_dim)
+            with torch.no_grad():
+                # Zero out positions beyond node_dim for non-queens
+                for c in range(16):
+                    if c not in (0, 8):
+                        self.pct_embed.weight[c, node_dim:] = 0
+        else:
+            self.register_parameter('pct_embed', None)
+
         self.layers = nn.ModuleList()
-        in_d = gnn_in_dim
-        for out_d in h_layers:
-            self.layers.append(CustomGATLayer(in_dim=in_d, out_dim=out_d, num_categories=16, 
+        for _ in range(num_layers):
+            self.layers.append(CustomGnnLayer(node_dim=node_dim, queen_dim=queen_dim, queen_cats=(0, 8), num_categories=16, 
                                               use_softmax=use_softmax, use_attention=use_attention, 
                                               use_pct_proj=use_pct_proj, use_pct_reweight=use_pct_reweight, 
-                                              use_pct_bias=use_pct_bias))
-            in_d = out_d
+                                              use_pct_bias=use_pct_bias, use_pct_layers=use_pct_layers,
+                                              use_self_proj=use_self_proj))
         
-        last_h = h_layers[-1]
-        self.pk = pk
-        if last_h != self.pk:
-            self.pool_proj = nn.Parameter(torch.Tensor(16, last_h, self.pk))
-            nn.init.xavier_uniform_(self.pool_proj)
-        else:
-            self.register_parameter('pool_proj', None)
-        
-        self.feat_proj = nn.Sequential(nn.Linear(16 * self.pk, feat_dim), nn.LeakyReLU(.1))
+        self.pool_dim = 2 * queen_dim + 14 * node_dim
+        self.feat_proj = nn.Sequential(nn.Linear(self.pool_dim, feat_dim), nn.LeakyReLU(.1))
         
         self.mlp = nn.Sequential(
-            nn.Linear(16 * self.pk, 16),
+            nn.Linear(self.pool_dim, 16),
             nn.ReLU(),
             nn.Linear(16, 12),
             nn.ReLU(),
@@ -306,27 +389,46 @@ class GNNModel(nn.Module):
         )
         
     def forward(self, nodes, edges, batch_idx, clip):
-        h = nodes
+        cat = nodes[:, 0].long()
+        feat = nodes[:, 1:]
+        feat_d = feat.size(1)
+        is_queen = (cat == 0) | (cat == 8)
+        
+        # Pad input features to queen_dim
+        if feat_d < self.queen_dim:
+            feat = torch.cat([feat, torch.zeros(feat.size(0), self.queen_dim - feat_d, device=feat.device)], dim=1)
+        
+        # Add PCT embeddings
+        if self.use_pct_embeddings:
+            emb = self.pct_embed(cat)
+            feat = feat + emb
+        
+        h = torch.cat([cat.unsqueeze(1).float(), feat], dim=1)
+
         for layer in self.layers:
             h = layer(h, edges)
         
         cat = h[:, 0].long()
         feat = h[:, 1:] 
         
-        if self.pool_proj is not None:
-            W = self.pool_proj[cat] 
-            z = torch.bmm(feat.unsqueeze(1), W).squeeze(1) 
-            z = torch.relu(z)
-        else:
-            z = feat
-        
         max_batch = batch_idx.max().item() + 1
         flat_idx = batch_idx * 16 + cat 
         
-        pooled_flat = torch.zeros(max_batch * 16, self.pk, device=nodes.device)
-        pooled_flat.scatter_add_(0, flat_idx.unsqueeze(-1).expand_as(z), z)
+        # pooling adds node embeddings of the same PCT
+
+        pooled_flat = torch.zeros(max_batch * 16, self.queen_dim, device=nodes.device)
+        pooled_flat.scatter_add_(0, flat_idx.unsqueeze(-1).expand_as(feat), feat)
         
-        pooled = pooled_flat.view(max_batch, 16 * self.pk)
+        pooled_matrix = pooled_flat.view(max_batch, 16, self.queen_dim)
+        
+        out_features = []
+        for c in range(16):
+            if c == 0 or c == 8:
+                out_features.append(pooled_matrix[:, c, :self.queen_dim])
+            else:
+                out_features.append(pooled_matrix[:, c, :self.node_dim])
+        
+        pooled = torch.cat(out_features, dim=1)
         
         out = self.mlp(pooled)
         pred_feat = self.feat_proj(pooled)
@@ -345,15 +447,21 @@ if __name__ == "__main__":
     p.add_argument("--clip", type=int, default=6000)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--batch", type=int, default=128)
+    p.add_argument("--batch", type=int, default=512)
     p.add_argument("--lambda-w", type=float, default=2e-3)
     p.add_argument("--lambda-feat", type=float, default=1e-4)
     p.add_argument("--l2", type=float, default=2e-6)
     p.add_argument("--use-softmax", action="store_true")
     p.add_argument("--use-attention", action="store_true")
-    p.add_argument("--use-pct-proj", action="store_true")
-    p.add_argument("--use-pct-reweight", action="store_true")
-    p.add_argument("--use-pct-bias", action="store_true")
+    p.add_argument("--use-pct-proj", action="store_true", help="each category lives in its own space, project when passing messages according to PCT")
+    p.add_argument("--use-pct-reweight", action="store_true", help="during message passing, reweight according to the two PCTs of the edge")
+    p.add_argument("--use-pct-bias", action="store_true", help="sum an edge embedding which dpeends on the two PCTs it connects")
+    p.add_argument("--use-pct-layers", action="store_true", help="use different W,B for each category")
+    p.add_argument("--no-self-proj", action="store_false", dest="use_self_proj", default=True, help="disable learnable self-projection in GNN update")
+    p.add_argument("--no-pct-embeddings", action="store_false", dest="pct_embeddings", default=True, help="disable input embeddings for each PCT")
+    p.add_argument("--node-dim", type=int, default=4, help="feature size for normal nodes")
+    p.add_argument("--queen-dim", type=int, default=12, help="feature size for queen nodes (cat 0 and 8)")
+    p.add_argument("--num-layers", type=int, default=3, help="number of GNN layers")
     p.add_argument("--no-augment", action="store_true")
     p.add_argument("--no-moves-count", action="store_true")
     p.add_argument("--load-ckpt", default=None, help="Path to checkpoint .pth to load")
@@ -446,7 +554,7 @@ if __name__ == "__main__":
     gnn_in_dim = len(merged_data[0][3]["nodes"][0]) - 1
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
-    model = GNNModel(feat_dim=feat_dim, gnn_in_dim=gnn_in_dim, use_softmax=args.use_softmax, use_attention=args.use_attention, use_pct_proj=args.use_pct_proj, use_pct_reweight=args.use_pct_reweight, use_pct_bias=args.use_pct_bias).to(device)
+    model = GNNModel(feat_dim=feat_dim, gnn_in_dim=gnn_in_dim, num_layers=args.num_layers, node_dim=args.node_dim, queen_dim=args.queen_dim, use_softmax=args.use_softmax, use_attention=args.use_attention, use_pct_proj=args.use_pct_proj, use_pct_reweight=args.use_pct_reweight, use_pct_bias=args.use_pct_bias, use_pct_layers=args.use_pct_layers, use_pct_embeddings=args.pct_embeddings, use_self_proj=args.use_self_proj).to(device)
 
     if args.load_ckpt:
         if os.path.exists(args.load_ckpt):
@@ -644,24 +752,45 @@ if __name__ == "__main__":
 
     rust_out_path = "logs/eval_gnn.rs"
     with open(rust_out_path, "w") as f:
+        if hasattr(model, 'pct_embed') and model.pct_embed is not None:
+            pct_e = model.pct_embed.weight.detach().cpu().numpy()
+            c, d = pct_e.shape
+            f.write(f"\tconst PCT_EMBED: [[f32; {d}]; {c}] = [\n")
+            for cat in range(c):
+                f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in pct_e[cat]) + "],\n")
+            f.write("\t];\n\n")
+
         for layer_idx, gat_layer in enumerate(model.layers, 1):
-            w_proj = gat_layer.W_proj.detach().cpu().numpy()
-            c, i, o = w_proj.shape
-            ident_w = f"GAT{layer_idx}_W"
-            f.write(f"\tconst {ident_w}: [[[f32; {o}]; {i}]; {c}] = [\n")
-            for cat in range(c):
-                f.write("\t\t[\n")
+            if gat_layer.use_pct_layers:
+                w_proj = gat_layer.W_proj.detach().cpu().numpy()
+                c, i, o = w_proj.shape
+                ident_w = f"GAT{layer_idx}_W"
+                f.write(f"\tconst {ident_w}: [[[f32; {o}]; {i}]; {c}] = [\n")
+                for cat in range(c):
+                    f.write("\t\t[\n")
+                    for row in range(i):
+                        f.write("\t\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_proj[cat, row]) + "],\n")
+                    f.write("\t\t],\n")
+                f.write("\t];\n\n")
+                
+                b_proj = gat_layer.B_proj.detach().cpu().numpy()
+                ident_b = f"GAT{layer_idx}_B"
+                f.write(f"\tconst {ident_b}: [[f32; {o}]; {c}] = [\n")
+                for cat in range(c):
+                    f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in b_proj[cat]) + "],\n")
+                f.write("\t];\n\n")
+            else:
+                w_proj = gat_layer.W_proj.detach().cpu().numpy()
+                i, o = w_proj.shape
+                ident_w = f"GAT{layer_idx}_W"
+                f.write(f"\tconst {ident_w}: [[f32; {o}]; {i}] = [\n")
                 for row in range(i):
-                    f.write("\t\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_proj[cat, row]) + "],\n")
-                f.write("\t\t],\n")
-            f.write("\t];\n\n")
-            
-            b_proj = gat_layer.B_proj.detach().cpu().numpy()
-            ident_b = f"GAT{layer_idx}_B"
-            f.write(f"\tconst {ident_b}: [[f32; {o}]; {c}] = [\n")
-            for cat in range(c):
-                f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in b_proj[cat]) + "],\n")
-            f.write("\t];\n\n")
+                    f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_proj[row]) + "],\n")
+                f.write("\t];\n\n")
+                
+                b_proj = gat_layer.B_proj.detach().cpu().numpy()
+                ident_b = f"GAT{layer_idx}_B"
+                f.write(f"\tconst {ident_b}: [f32; {o}] = [" + ", ".join(f"{float(x):.8e}f32" for x in b_proj) + "];\n\n")
             
             if args.use_attention:
                 a_attn = gat_layer.a_attn.detach().cpu().numpy().squeeze(-1)
@@ -711,6 +840,27 @@ if __name__ == "__main__":
                     f.write("\t\t],\n")
                 f.write("\t];\n\n")
 
+            if gat_layer.use_self_proj:
+                # Queen self-projection: queen_dim x queen_dim
+                w_sq = gat_layer.W_self_queen.detach().cpu().numpy()
+                iq, oq = w_sq.shape
+                f.write(f"\tconst GAT{layer_idx}_W_SELF_QUEEN: [[f32; {oq}]; {iq}] = [\n")
+                for row in range(iq):
+                    f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_sq[row]) + "],\n")
+                f.write("\t];\n\n")
+                b_sq = gat_layer.B_self_queen.detach().cpu().numpy()
+                f.write(f"\tconst GAT{layer_idx}_B_SELF_QUEEN: [f32; {oq}] = [" + ", ".join(f"{float(x):.8e}f32" for x in b_sq) + "];\n\n")
+
+                # Normal self-projection: node_dim x node_dim
+                w_sn = gat_layer.W_self_normal.detach().cpu().numpy()
+                in_, on = w_sn.shape
+                f.write(f"\tconst GAT{layer_idx}_W_SELF_NORMAL: [[f32; {on}]; {in_}] = [\n")
+                for row in range(in_):
+                    f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_sn[row]) + "],\n")
+                f.write("\t];\n\n")
+                b_sn = gat_layer.B_self_normal.detach().cpu().numpy()
+                f.write(f"\tconst GAT{layer_idx}_B_SELF_NORMAL: [f32; {on}] = [" + ", ".join(f"{float(x):.8e}f32" for x in b_sn) + "];\n\n")
+            
             b_edge_val = gat_layer.B_edge.detach().cpu().numpy()
             c_edge, out_d = b_edge_val.shape
             ident_e = f"GAT{layer_idx}_E_MSG"
@@ -718,17 +868,27 @@ if __name__ == "__main__":
             for ce in range(c_edge):
                 f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in b_edge_val[ce]) + "],\n")
             f.write("\t];\n\n")
-            
-        if hasattr(model, 'pool_proj') and model.pool_proj is not None:
-            p_proj = model.pool_proj.detach().cpu().numpy()
-            c_proj, i_proj, o_proj = p_proj.shape
-            f.write(f"\tconst POOL_PROJ: [[[f32; {o_proj}]; {i_proj}]; {c_proj}] = [\n")
-            for cat in range(c_proj):
-                f.write("\t\t[\n")
-                for row in range(i_proj):
-                    f.write("\t\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in p_proj[cat, row]) + "],\n")
-                f.write("\t\t],\n")
+
+            # Queen up/down projection export
+            w_dq = gat_layer.W_down_queen.detach().cpu().numpy()
+            iq_d, oq_d = w_dq.shape
+            f.write(f"\tconst GAT{layer_idx}_W_DOWN_QUEEN: [[f32; {oq_d}]; {iq_d}] = [\n")
+            for row in range(iq_d):
+                f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_dq[row]) + "],\n")
             f.write("\t];\n\n")
+            b_dq = gat_layer.B_down_queen.detach().cpu().numpy()
+            f.write(f"\tconst GAT{layer_idx}_B_DOWN_QUEEN: [f32; {oq_d}] = [" + ", ".join(f"{float(x):.8e}f32" for x in b_dq) + "];\n\n")
+
+            w_uq = gat_layer.W_up_queen.detach().cpu().numpy()
+            iq_u, oq_u = w_uq.shape
+            f.write(f"\tconst GAT{layer_idx}_W_UP_QUEEN: [[f32; {oq_u}]; {iq_u}] = [\n")
+            for row in range(iq_u):
+                f.write("\t\t[" + ", ".join(f"{float(x):.8e}f32" for x in w_uq[row]) + "],\n")
+            f.write("\t];\n\n")
+            b_uq = gat_layer.B_up_queen.detach().cpu().numpy()
+            f.write(f"\tconst GAT{layer_idx}_B_UP_QUEEN: [f32; {oq_u}] = [" + ", ".join(f"{float(x):.8e}f32" for x in b_uq) + "];\n\n")
+            
+        # Removed pool_proj export
 
         next_layer = 1
         last_bias_layer = None
