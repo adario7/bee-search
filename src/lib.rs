@@ -8,6 +8,7 @@ pub mod board_io;
 pub mod abstractions;
 pub mod perft;
 pub mod eval;
+pub mod eval_mlp;
 pub mod engine;
 pub mod tt;
 pub mod features;
