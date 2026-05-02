@@ -22,7 +22,7 @@ Three benchmark groups run on a fixed, deterministic set of 15 positions
 ### 1. Save a baseline before your change
 
 ```sh
-cargo bench -- --save-baseline before
+cargo bench --bench bee_bench -- --save-baseline before
 ```
 
 This runs all three groups and saves the results under
@@ -33,7 +33,7 @@ This runs all three groups and saves the results under
 ### 3. Run again and compare
 
 ```sh
-cargo bench -- --baseline before
+cargo bench --bench bee_bench -- --baseline before
 ```
 
 Criterion prints a comparison for every benchmark:
@@ -48,8 +48,14 @@ movegen/midgame/s137    time:   [511.22 µs 512.88 µs 514.61 µs]
                         No change in performance detected.
 ```
 
-`p < 0.05` means the difference is statistically significant.
+`p < 0.05` means the difference is real, not noise.
 `p > 0.05` means it is indistinguishable from noise — don't count it.
+
+Note: with 100 samples, Criterion is sensitive enough to flag a 1% change
+as significant (p = 0.00). Statistical significance is not the same as
+practical significance. For this engine, only care about changes ≥ 5% —
+anything smaller is in the noise floor of the CPU itself (thermal throttling,
+cache state, OS scheduling).
 
 ---
 
@@ -57,16 +63,16 @@ movegen/midgame/s137    time:   [511.22 µs 512.88 µs 514.61 µs]
 
 ```sh
 # Only movegen (fast, ~2 min)
-cargo bench -- movegen
+cargo bench --bench bee_bench -- movegen
 
 # Only do/undo (fast, ~2 min)
-cargo bench -- do_undo
+cargo bench --bench bee_bench -- do_undo
 
 # Only search (slow, ~15 min — 10 samples × 60s measurement per position)
-cargo bench -- search
+cargo bench --bench bee_bench -- search
 
 # One specific benchmark
-cargo bench -- movegen/midgame
+cargo bench --bench bee_bench -- movegen/midgame
 ```
 
 ---
@@ -87,7 +93,7 @@ Criterion also flags statistical outliers automatically.
 After any `cargo bench` run, open the HTML report for graphs:
 
 ```sh
-open build/criterion/report/index.html
+open build/criterion/bee_bench/report/index.html
 ```
 
 ---
