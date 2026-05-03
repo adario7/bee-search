@@ -5,7 +5,6 @@ edition = "2021"
 default-run = "bee-search"
 
 [dependencies]
-bitvec = "1"
 modular-bitfield = "0.11"
 lazy_static = "^1.4.0"
 regex = "1.11.1"

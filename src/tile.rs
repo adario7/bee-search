@@ -17,7 +17,6 @@
 //    0   1   2   3   4
 
 use std::ops::Add;
-use bitvec::prelude::*;
 
 // tile index
 pub type Tile = u16;
@@ -169,26 +168,5 @@ fn test_hex_loc() {
         let t = i as Tile;
         let l = tile_to_loc(t);
         assert_eq!(t, loc_to_tile(l), "{} != {},{}", i, l.0, l.1);
-    }
-}
-
-
-pub struct TileSet(BitArr!(for GRID_SIZE, in u32));
-
-impl TileSet {
-    pub fn new() -> Self {
-        Self(BitArray::ZERO)
-    }
-
-    pub fn set(&mut self, tile: Tile) {
-        self.0.set(tile as usize, true);
-    }
-
-    pub fn unset(&mut self, tile: Tile) {
-        self.0.set(tile as usize, false);
-    }
-
-    pub fn get(&self, tile: Tile) -> bool {
-        self.0[tile as usize]
     }
 }

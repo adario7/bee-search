@@ -5,6 +5,7 @@ use crossbeam::thread;
 pub type Depth = u8;
 const INF: Eval = 32500;
 const WIN: Eval = 32000;
+const MAX_QS_EXTRA: Depth = 6;
 
 fn mate_in(ply: Depth) -> Eval {
     WIN + 99 - ply as Eval
@@ -334,7 +335,7 @@ impl Engine {
 
         // depth cutoff case
         if depth == 0 {
-            return self.qsearch(td, ply, ply * 2, alpha, beta, killers);
+            return self.qsearch(td, ply, ply + MAX_QS_EXTRA, alpha, beta, killers);
         }
 
         // move count pruning
@@ -389,7 +390,7 @@ impl Engine {
 
         // razoring
         if nt != NodeType::Pv && depth <= 6 && (eval as i32) < (alpha as i32 - 500 - 200 * depth as i32 * depth as i32) {
-            return self.qsearch(td, ply, ply * 2, alpha, beta, killers)
+            return self.qsearch(td, ply, ply + MAX_QS_EXTRA, alpha, beta, killers)
         }
 
         // futility pruning
