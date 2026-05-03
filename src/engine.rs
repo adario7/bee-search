@@ -1,5 +1,5 @@
 use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
-use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc}, time::{Duration, Instant}, u64, usize};
+use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc, Mutex}, time::{Duration, Instant}, u64, usize};
 use crossbeam::thread;
 
 pub type Depth = u8;
@@ -31,6 +31,8 @@ pub struct Engine {
     // LMR table
     reductions: Vec<f32>,
     move_votes: Vec<AtomicU64>,
+    // Pre-allocated per-thread history/countermove tables, reused across best_move() calls
+    thread_tables: Vec<Mutex<(Vec<i64>, Vec<Action>)>>,
 }
 
 pub struct ThreadData {
@@ -84,12 +86,18 @@ impl Engine {
             0.55 * (i as f32).ln()
         }).collect();
         let move_votes = (0..(GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1).map(|_| AtomicU64::new(0)).collect();
+        let hist_size = 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1;
+        let max_threads = num_cpus::get();
+        let thread_tables = (0..max_threads)
+            .map(|_| Mutex::new((vec![0i64; hist_size], vec![Action::Pass; hist_size])))
+            .collect();
         Self {
             nnodes: AtomicU64::new(0),
             qsnodes: AtomicU64::new(0),
             tt: TTable::new(1 << 28), // TODO: make this configurable
             reductions,
-            move_votes
+            move_votes,
+            thread_tables,
         }
     }
 
@@ -540,7 +548,10 @@ impl Engine {
         for &mv in &root_moves {
             self.move_votes[Self::vote_index(mv)].store(0, atomic::Ordering::Relaxed);
         }
-    
+
+        // Cap at pre-allocated slots; extra threads would require fresh allocation.
+        let num_threads = num_threads.min(self.thread_tables.len());
+
         thread::scope(|scope| {
             let abort = Arc::new(AtomicBool::new(false));
             let compl = Arc::new(AtomicU8::new(0));
@@ -550,18 +561,26 @@ impl Engine {
                 let th_compl = compl.clone();
                 let th_board = board.clone();
                 scope.spawn(move |_| {
+                    // Decay history and take the pre-allocated vecs for this search.
+                    let (history_h, countermove) = {
+                        let mut slot = th_engine.thread_tables[i].lock().unwrap();
+                        for v in slot.0.iter_mut() { *v /= 2; }
+                        (std::mem::take(&mut slot.0), std::mem::take(&mut slot.1))
+                    };
                     let mut td = ThreadData {
                         id: i,
                         board: th_board,
                         abort: th_abort,
                         completed_depth: th_compl,
                         deadline,
-                        history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
-                        countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                        history_h,
+                        countermove,
                         local_nodes: 0,
                         last_vote: None,
                     };
                     th_engine.iterative_deepening(&mut td, max_depth);
+                    // Return the vecs to the pre-allocated slot for the next call.
+                    *th_engine.thread_tables[i].lock().unwrap() = (td.history_h, td.countermove);
                 });
             }
         })
