@@ -32,7 +32,7 @@ impl Board {
         }
         for &tile in self.occupied_tiles[color.other().index()].iter() {
             if self.height(tile) > 1 {
-                for pc in self.underworld.get(&tile).unwrap_or(&vec![]).iter() {
+                for pc in self.underworld_at(tile).iter() {
                     if pc.color() == color {
                         buried[pc.ptype().index()] += 1;
                     }

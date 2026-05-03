@@ -1,5 +1,6 @@
 use bee_search::board::{Action, Board, GameResult};
 use bee_search::engine::{Depth, Engine};
+use bee_search::perft::perft;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::seq::IndexedRandom;
 use rand::{rngs::StdRng, SeedableRng};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 const SEEDS: &[u64] = &[1, 2, 3, 4, 5];
 const PLIES: &[(usize, &str)] = &[(6, "opening"), (14, "midgame"), (24, "endgame")];
 const SEARCH_DEPTH: Depth = 4;
+const PERFT_DEPTH: usize = 3;
 const WARMUP: Duration = Duration::from_secs(2);
 const MEASUREMENT: Duration = Duration::from_secs(5);
 
@@ -41,7 +43,6 @@ fn make_positions() -> Vec<Board> {
 // ─── movegen ─────────────────────────────────────────────────────────────────
 // Measures generate_moves() calls per second.
 // Exercises: cut vertex DFS, TileSet ops, placement/movement generation.
-
 fn bench_movegen(c: &mut Criterion) {
     let mut group = c.benchmark_group("movegen");
     group.warm_up_time(WARMUP);
@@ -61,7 +62,6 @@ fn bench_movegen(c: &mut Criterion) {
 // Measures do_action + undo_action round-trips per second.
 // Exercises: HashMap/array underworld, OccupancyVec, Zobrist hash update.
 // This is what each node in the search tree pays in board-manipulation cost.
-
 fn bench_do_undo(c: &mut Criterion) {
     let mut group = c.benchmark_group("do_undo");
     group.warm_up_time(WARMUP);
@@ -91,7 +91,6 @@ fn bench_do_undo(c: &mut Criterion) {
 // Exercises: TT hit rate, move ordering, eval (MLP), Lazy SMP threading.
 // Each sample is slow (~1s), so Criterion uses fewer iterations but still
 // produces a proper confidence interval.
-
 fn bench_search(c: &mut Criterion) {
     let threads = 1;
     let mut group = c.benchmark_group("search");
@@ -125,5 +124,23 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_movegen, bench_do_undo, bench_search);
+// ─── perft ───────────────────────────────────────────────────────────────────
+// Measures perft(depth=1) for all positions.
+// This is a proxy for movegen + do/undo performance.
+fn bench_perft(c: &mut Criterion) {
+    let mut group = c.benchmark_group("perft");
+    group.warm_up_time(WARMUP);
+    group.measurement_time(MEASUREMENT);
+    let mut positions = make_positions();
+    group.bench_function("all", |b| {
+        b.iter(|| {
+            for board in &mut positions {
+                black_box(perft(board, PERFT_DEPTH));
+            }
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_movegen, bench_do_undo, bench_search, bench_perft);
 criterion_main!(benches);

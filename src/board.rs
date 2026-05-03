@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
 use std::hash::Hasher;
@@ -31,8 +30,9 @@ pub struct Board {
     pub gametype: String,
     // the piece on each tile of the board, for stacks: to topmost piece
     pub world: [Piece; GRID_SIZE],
-    // stacked pieces, from bottom to top
-    pub underworld: HashMap<Tile, Vec<Piece>>, // aka "sottobosco"
+    // stacked pieces, from bottom to top (index 0 = bottom, underworld_depth-1 = top)
+    pub underworld: [[Piece; 8]; GRID_SIZE], // aka "sottobosco"
+    pub underworld_depth: [u8; GRID_SIZE],
     // remaining pieces still to be placed
     pub placeable: [[u8; 8]; 2],
     // position of the queens
@@ -86,7 +86,8 @@ impl Board {
                     "".to_string()
                 }),
             world: [Piece::empty(); GRID_SIZE],
-            underworld: HashMap::new(),
+            underworld: [[Piece::empty(); 8]; GRID_SIZE],
+            underworld_depth: [0; GRID_SIZE],
             placeable: [[1, 3, 2, 3, 2, m, l, p], [1, 3, 2, 3, 2, m, l, p]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
             occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
@@ -142,10 +143,17 @@ impl Board {
         vec.remove(t);
     }
 
+    pub fn underworld_at(&self, tile: Tile) -> &[Piece] {
+        let d = self.underworld_depth[tile as usize] as usize;
+        &self.underworld[tile as usize][..d]
+    }
+
     fn add_piece(&mut self, tile: Tile, piece: Piece) {
         let curr = &mut self.world[tile as usize];
         if curr.is_some() {
-            self.underworld.entry(tile).or_insert_with(Vec::new).push(*curr);
+            let d = self.underworld_depth[tile as usize] as usize;
+            self.underworld[tile as usize][d] = *curr;
+            self.underworld_depth[tile as usize] += 1;
             Self::remove_occupancy(&mut self.occupied_tiles, *curr, tile);
         }
         *curr = piece;
@@ -172,13 +180,11 @@ impl Board {
             self.queens[curr.color().index()] = None;
         }
         Self::remove_occupancy(&mut self.occupied_tiles, *curr, tile);
-        if let Some(vec) = self.underworld.get_mut(&tile) {
-            let last = vec.pop().unwrap();
-            if vec.is_empty() {
-                self.underworld.remove(&tile);
-            }
-            *curr = last;
-            Self::add_occupancy(&mut self.occupied_tiles, *curr, tile); // the uncovered piece may have a differe color
+        let d = self.underworld_depth[tile as usize];
+        if d > 0 {
+            self.underworld_depth[tile as usize] -= 1;
+            *curr = self.underworld[tile as usize][d as usize - 1];
+            Self::add_occupancy(&mut self.occupied_tiles, *curr, tile); // the uncovered piece may have a different color
         } else {
             *curr = Piece::empty();
         }
@@ -320,7 +326,7 @@ mod test {
         board.do_action(Action::Move(a, b));
         assert_eq!(board.world[a as usize], Piece::empty());
         assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
-        assert_eq!(*board.underworld[&b].first().unwrap(), Piece::make(Color::Black, PieceType::Queen, 1));
+        assert_eq!(board.underworld[b as usize][0], Piece::make(Color::Black, PieceType::Queen, 1));
         board.undo_action();
         assert_eq!(board.world[a as usize], Piece::make(Color::White, PieceType::Queen, 1));
         assert_eq!(board.world[b as usize], Piece::make(Color::Black, PieceType::Queen, 1));
@@ -360,13 +366,12 @@ mod test {
                     return false;
                 }
 
-                if let Some(vec1) = b1.underworld.get(&tile) {
-                    if let Some(vec2) = b2.underworld.get(&tile){
-                        for j in 0..vec1.len() {
-                            if vec1[j] != vec2[j] {
-                                return false;
-                            }
-                        }
+                let d1 = b1.underworld_depth[*tile as usize] as usize;
+                let d2 = b2.underworld_depth[*tile as usize] as usize;
+                if d1 != d2 { return false; }
+                for j in 0..d1 {
+                    if b1.underworld[*tile as usize][j] != b2.underworld[*tile as usize][j] {
+                        return false;
                     }
                 }
                 

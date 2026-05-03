@@ -43,19 +43,17 @@ impl Board {
             let is_fixed = cut_vertexes.get(hex) && h == 1;
 
             if h > 1 {
-                if let Some(underworld) = self.underworld.get(&hex) {
-                    for (i, piece) in underworld.iter().enumerate() {
-                        let color_bin = (piece.color() != self.color()) as i8;
-                        let r_ptype = piece.ptype().index() as i8;
-                        let is_buried = 1;
-                        let mut fixed_val = 0;
-                        if i == 0 && cut_vertexes.get(hex) {
-                            fixed_val = 1;
-                        }
-                        features.push([color_bin * (PCT_COUNT as i8) + r_ptype, i as i8, fixed_val, is_buried, 0]);
-                        edges.push([current_node_idx, current_node_idx + 1, 6]);
-                        current_node_idx += 1;
+                for (i, piece) in self.underworld_at(hex).iter().enumerate() {
+                    let color_bin = (piece.color() != self.color()) as i8;
+                    let r_ptype = piece.ptype().index() as i8;
+                    let is_buried = 1;
+                    let mut fixed_val = 0;
+                    if i == 0 && cut_vertexes.get(hex) {
+                        fixed_val = 1;
                     }
+                    features.push([color_bin * (PCT_COUNT as i8) + r_ptype, i as i8, fixed_val, is_buried, 0]);
+                    edges.push([current_node_idx, current_node_idx + 1, 6]);
+                    current_node_idx += 1;
                 }
             }
 
