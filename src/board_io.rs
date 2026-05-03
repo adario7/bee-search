@@ -87,10 +87,8 @@ impl Board {
                 return;
             }else if adj.is_some() && self.height(origin) > 1 {
                 out.push_str(dir.opposite().prefix_name());
-                if let Some(under_pieces) = self.underworld.get(&(tile + *dir)) {
-                    if let Some(piece) = under_pieces.last() {
-                        self.piece_name(*piece, out);
-                    }
+                if let Some(&piece) = self.underworld_at(tile + *dir).last() {
+                    self.piece_name(piece, out);
                 }
                 out.push_str(dir.opposite().suffix_name());
                 return;
@@ -216,7 +214,7 @@ impl Board {
     fn find_piece(&self, piece: Piece) -> Option<Tile> {
         self.occupied_tiles.iter()
             .flat_map(|v| v.iter()).copied()
-            .find(|&t| self.tile(t) == piece || self.underworld.get(&t).unwrap_or(&Vec::new()).contains(&piece))
+            .find(|&t| self.tile(t) == piece || self.underworld_at(t).contains(&piece))
     }
 
     fn parse_tile(&self, s: &str) -> Option<Tile> {
