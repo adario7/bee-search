@@ -215,10 +215,8 @@ impl Uhp {
 
             println!("{} {} ",self.board.tile(*node).color().index() ^ self.board.color().index(), self.board.tile(*node).ptype().index());
 
-            if let Some(underworld) = self.board.underworld.get(node) {
-                for piece in underworld {
-                    println!("{} {} ", piece.color().index() ^ self.board.color().index(), piece.ptype().index());
-                }
+            for piece in self.board.underworld_at(*node) {
+                println!("{} {} ", piece.color().index() ^ self.board.color().index(), piece.ptype().index());
             }
         }
         Ok(())
