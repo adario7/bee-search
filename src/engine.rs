@@ -1,5 +1,5 @@
 use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
-use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc, Mutex}, time::{Duration, Instant}, u64, usize};
+use std::{sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc, Mutex}, time::{Duration, Instant}, u64, usize};
 use crossbeam::thread;
 
 pub type Depth = u8;
@@ -50,9 +50,8 @@ pub struct ThreadData {
 #[derive(Clone, Copy, Debug)]
 struct MoveInfo {
     mv: Action,
+    score: i32,
     quiet: bool,
-    killer: u8,
-    hist: i64
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,43 +151,26 @@ impl Engine {
     }*/
 
     fn order_moves(&self, moves: Vec<Action>, td: &mut ThreadData, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
-        let pv = pv.unwrap_or(Action::Pass);
+        let pv_mv = pv.unwrap_or(Action::Pass);
         let countermove = td.countermove[Self::last_move_index(&td.board)];
-        let mut moves = moves.into_iter()
-            .map(|mv| MoveInfo { mv,
-                quiet: td.board.is_quiet(&mv),
-                killer: killers.iter().find(|(m, _)| *m == mv).map(|(_, i)| *i).unwrap_or(0),
-                hist: td.history_h[Self::hist_index(td.board.color(), mv)] })
-            .collect::<Vec<_>>();
-        moves.sort_by(|a, b| {
-            // 1) PV
-            if a.mv == pv {
-                return Ordering::Less;
-            } else if b.mv == pv {
-                return Ordering::Greater;
-            }
-            // 2) attacks on the queen
-            if !a.quiet && b.quiet {
-                return Ordering::Less;
-            } else if a.quiet && !b.quiet {
-                return Ordering::Greater;
-            }
-            // 3) killer moves
-            if a.killer != b.killer {
-                return b.killer.cmp(&a.killer);
-            }
-            // 4) history heuristic
-            if a.hist != b.hist {
-                return b.hist.cmp(&a.hist);
-            }
-            // 5) countermove
-            if a.mv == countermove {
-                return Ordering::Less;
-            } else if b.mv == countermove {
-                return Ordering::Greater;
-            }
-            return Ordering::Equal;
-        });
+        let mut moves: Vec<MoveInfo> = moves.into_iter().map(|mv| {
+            let quiet = td.board.is_quiet(&mv);
+            let score = if mv == pv_mv {
+                i32::MAX
+            } else {
+                let noisy   = if !quiet { 10_000_000i32 } else { 0 };
+                let killer  = killers.iter()
+                    .find(|(m, _)| *m == mv)
+                    .map(|(_, i)| *i as i32)
+                    .unwrap_or(0) * 100_000;
+                let hist    = td.history_h[Self::hist_index(td.board.color(), mv)]
+                    .clamp(-5_000_000, 5_000_000) as i32;
+                let counter = if mv == countermove { 50_000i32 } else { 0 };
+                noisy + killer + hist + counter
+            };
+            MoveInfo { mv, score, quiet }
+        }).collect();
+        moves.sort_unstable_by_key(|m| -m.score);
         moves
     }
 
