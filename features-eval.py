@@ -371,6 +371,8 @@ if __name__ == "__main__":
 	plt.grid(True)
 	plt.savefig("logs/training_loss.png")
 	print("\nLoss plot saved to logs/training_loss.png")
+	with open("logs/training_history.json", "w") as f:
+		json.dump(history, f)
 
 	half_a.eval(); half_b.eval(); final.eval()
 	with torch.no_grad():
