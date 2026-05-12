@@ -80,12 +80,12 @@ class Engine:
         return lines
 
     def terminate(self):
-        self.stderr_log_file.close()
         self.proc.terminate()
         try:
             self.proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.stderr_log_file.close()
 
     def restart(self):
         print(f"Try restarting the engine [{self.name}]")

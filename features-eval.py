@@ -93,6 +93,7 @@ if __name__ == "__main__":
 	p.add_argument("--mlp-batch", type=int, default=256)
 	p.add_argument("--mlp-lambda", type=float, default=2e-3, help="Fixed weight for winner loss term")
 	p.add_argument("--mlp-l2", type=float, default=2e-5, help="L2 regularization coefficient")
+	p.add_argument("--mlp-l2-sym", type=float, default=1e-5, help="L2 symmetry regularization pushing half_a and half_b toward same weights")
 	p.add_argument("--skip-lr", action="store_true", help="Skip Linear Regression and do only MLP")
 	p.add_argument("--load-ckpt", default=None, help="Path to checkpoint .pth to load")
 	args = p.parse_args()
@@ -255,48 +256,36 @@ if __name__ == "__main__":
 			winner_out = torch.sigmoid(out[:, 1])
 			return eval_out, winner_out
 
-	mid_half_dim = 8
-	mid_adj_dim = 6
-	shared1 = HalfMLP(N, out_dim=mid_half_dim).to(device)
-	shared2 = HalfMLP(N, out_dim=mid_half_dim).to(device)
-	adj_net = AdjMLP(ADJ, out_dim=mid_adj_dim).to(device)
-	final = FinalMLP(in_dim=mid_half_dim*2 + mid_adj_dim).to(device)
+	mid_half_dim = 6
+	half_a = HalfMLP(N, out_dim=mid_half_dim).to(device)
+	half_b = HalfMLP(N, out_dim=mid_half_dim).to(device)
+	final = FinalMLP(in_dim=mid_half_dim*2).to(device)
 
 	if args.load_ckpt:
 		if os.path.exists(args.load_ckpt):
 			ckpt = torch.load(args.load_ckpt, map_location=device)
-			shared1.load_state_dict(ckpt['shared1'])
-			shared2.load_state_dict(ckpt['shared2'])
-			adj_net.load_state_dict(ckpt['adj_net'])
+			half_a.load_state_dict(ckpt['half_a'])
+			half_b.load_state_dict(ckpt['half_b'])
 			final.load_state_dict(ckpt['final'])
 			print(f"Loaded checkpoint from {args.load_ckpt}")
 		else:
 			print(f"Warning: checkpoint not found at {args.load_ckpt}")
 
-	s1_p, s1_f = count_stats(shared1)
-	s2_p, s2_f = count_stats(shared2)
-	adj_p, adj_f = count_stats(adj_net)
-	f_p, f_f = count_stats(final)
-
-	p_total = s1_p + s2_p + adj_p + f_p
-	f_total = s1_f + s2_f + adj_f + f_f
-
-	print("\nModel Architecture Summary:")
-	print(f"{'Section':<10} | {'Parameters':>12} | {'FLOPs':>12}")
-	print("-" * 40)
-	print(f"{'Player':<10} | {s1_p + s2_p:>12,} | {s1_f + s2_f:>12,}")
-	print(f"{'Adj':<10} | {adj_p:>12,} | {adj_f:>12,}")
-	print(f"{'Final':<10} | {f_p:>12,} | {f_f:>12,}")
-	print("-" * 40)
-	print(f"{'Total':<10} | {p_total:>12,} | {f_total:>12,}")
-	print()
-	
-	all_params = list(shared1.parameters()) + list(shared2.parameters()) + list(adj_net.parameters()) + list(final.parameters())
+	all_params = list(half_a.parameters()) + list(half_b.parameters()) + list(final.parameters())
+	print("Total parameters:", sum(p.numel() for p in all_params))
 	optimizer = torch.optim.Adam(all_params, lr=args.mlp_lr)
 	loss_fn_eval = nn.MSELoss()
 	loss_fn_winner = nn.BCELoss()
 	lambda_w = args.mlp_lambda
 	l2_coef = args.mlp_l2
+	l2_sym_coef = args.mlp_l2_sym
+
+	def symmetry_reg():
+		"""L2 penalty on the difference between half_a and half_b parameters."""
+		loss = 0.0
+		for pa, pb in zip(half_a.parameters(), half_b.parameters()):
+			loss = loss + (pa - pb).pow(2).sum()
+		return l2_sym_coef * loss
 
 	# prepare dataloaders
 	Xtr = torch.from_numpy(X_train_aug.astype(np.float32))
@@ -314,74 +303,78 @@ if __name__ == "__main__":
 	best_epoch = -1
 	history = {'train_loss': [], 'test_loss': []}
 
-	shared1.train(); shared2.train(); adj_net.train(); final.train()
 	for epoch in range(args.mlp_epochs):
 		running_eval_loss = 0.0
+		running_eval_rmse = 0.0
 		running_winner_loss = 0.0
 		running_reg_loss = 0.0
+		running_sym_loss = 0.0
 		running_total_loss = 0.0
 		total = 0
+		half_a.train(); half_b.train(); final.train()
 		for xb, yb, wb in train_loader:
 			xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
-			h1 = shared1(xb[:, :N]); h2 = shared2(xb[:, N:2*N])
-			h_adj = adj_net(xb[:, 2*N:])
-			conc = torch.cat([h1, h2, h_adj], dim=1)
+			h1 = half_a(xb[:, :N]); h2 = half_b(xb[:, N:])
+			conc = torch.cat([h1, h2], dim=1)
 			pred_eval, pred_winner = final(conc)
 			loss_eval = loss_fn_eval(pred_eval/args.clip, yb/args.clip)
 			loss_winner = lambda_w * loss_fn_winner(pred_winner, wb)
 			l2_reg = l2_coef * sum(p.pow(2).sum() for p in all_params)
-			loss = loss_eval + loss_winner + l2_reg
+			sym_reg = symmetry_reg()
+			loss = loss_eval + loss_winner + l2_reg + sym_reg
 			optimizer.zero_grad(); loss.backward(); optimizer.step()
 			bs = xb.size(0)
 			running_eval_loss += loss_eval.item() * bs
+			running_eval_rmse += ((pred_eval - yb)**2).sum().item()
 			running_winner_loss += loss_winner.item() * bs
 			running_reg_loss += l2_reg.item() * bs
+			running_sym_loss += sym_reg.item() * bs
 			running_total_loss += loss.item() * bs
 			total += bs
 		train_eval_loss = running_eval_loss / total
+		train_eval_rmse = (running_eval_rmse / total) ** 0.5
 		train_winner_loss = running_winner_loss / total
 		train_reg_loss = running_reg_loss / total
+		train_sym_loss = running_sym_loss / total
 		train_total_loss = running_total_loss / total
 
-		shared1.eval(); shared2.eval(); adj_net.eval(); final.eval()
+		half_a.eval(); half_b.eval(); final.eval()
 		with torch.no_grad():
 			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device); Wte_dev = Wte.to(device)
-			h1 = shared1(Xte_dev[:, :N]); h2 = shared2(Xte_dev[:, N:2*N])
-			h_adj = adj_net(Xte_dev[:, 2*N:])
-			conc = torch.cat([h1, h2, h_adj], dim=1)
+			h1 = half_a(Xte_dev[:, :N]); h2 = half_b(Xte_dev[:, N:])
+			conc = torch.cat([h1, h2], dim=1)
 			val_eval_pred, val_winner_pred = final(conc)
 			val_eval_loss = loss_fn_eval(val_eval_pred/args.clip, Yte_dev/args.clip).item()
-			val_eval_rmse = (val_eval_pred - Yte_dev).pow(2).mean().item()**0.5
+			val_eval_rmse = ((val_eval_pred - Yte_dev)**2).mean().item() ** 0.5
 			val_winner_loss = lambda_w * loss_fn_winner(val_winner_pred, Wte_dev).item()
 			val_winner_mae = (val_winner_pred - Wte_dev).abs().mean().item()
 			val_l2_reg = l2_coef * sum(p.pow(2).sum() for p in all_params).item()
+			val_sym_reg = symmetry_reg().item()
 			val_reg_loss = val_l2_reg
-			val_total_loss = val_eval_loss + val_winner_loss + val_reg_loss
+			val_total_loss = val_eval_loss + val_winner_loss + val_reg_loss + val_sym_reg
 
 			if val_eval_loss < best_val_loss:
 				best_val_loss = val_eval_loss
 				best_epoch = epoch + 1
 				best_state = {
-					'shared1': {k: v.cpu().clone() for k, v in shared1.state_dict().items()},
-					'shared2': {k: v.cpu().clone() for k, v in shared2.state_dict().items()},
-					'adj_net': {k: v.cpu().clone() for k, v in adj_net.state_dict().items()},
+					'half_a': {k: v.cpu().clone() for k, v in half_a.state_dict().items()},
+					'half_b': {k: v.cpu().clone() for k, v in half_b.state_dict().items()},
 					'final': {k: v.cpu().clone() for k, v in final.state_dict().items()}
 				}
 		
 		history['train_loss'].append(train_total_loss)
 		history['test_loss'].append(val_total_loss)
 
-		shared1.train(); shared2.train(); adj_net.train(); final.train()
+		half_a.train(); half_b.train(); final.train()
 		print(
 			f"Epoch {epoch+1}/{args.mlp_epochs} | "
-			f"TRAIN loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
-			f"TEST  eval={val_eval_rmse:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}"
+			f"TRAIN eval={train_eval_rmse:.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f}+{100*train_sym_loss:.4f} | "
+			f"TEST  eval={val_eval_rmse:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}={100*val_eval_loss:.4f}+{100*val_winner_loss:.4f}+{100*val_reg_loss:.4f}+{100*val_sym_reg:.4f}"
 		)
 
 	if best_state is not None:
-		shared1.load_state_dict({k: v.to(device) for k, v in best_state['shared1'].items()})
-		shared2.load_state_dict({k: v.to(device) for k, v in best_state['shared2'].items()})
-		adj_net.load_state_dict({k: v.to(device) for k, v in best_state['adj_net'].items()})
+		half_a.load_state_dict({k: v.to(device) for k, v in best_state['half_a'].items()})
+		half_b.load_state_dict({k: v.to(device) for k, v in best_state['half_b'].items()})
 		final.load_state_dict({k: v.to(device) for k, v in best_state['final'].items()})
 		
 		# Save best model
@@ -400,14 +393,15 @@ if __name__ == "__main__":
 	plt.grid(True)
 	plt.savefig("logs/training_loss.png")
 	print("\nLoss plot saved to logs/training_loss.png")
+	with open("logs/training_history.json", "w") as f:
+		json.dump(history, f)
 
-	shared1.eval(); shared2.eval(); adj_net.eval(); final.eval()
+	half_a.eval(); half_b.eval(); final.eval()
 	with torch.no_grad():
 		Xte_dev = Xte.to(device)
-		h1 = shared1(Xte_dev[:, :N])
-		h2 = shared2(Xte_dev[:, N:2*N])
-		h_adj = adj_net(Xte_dev[:, 2*N:])
-		conc = torch.cat([h1, h2, h_adj], dim=1)
+		h1 = half_a(Xte_dev[:, :N])
+		h2 = half_b(Xte_dev[:, N:])
+		conc = torch.cat([h1, h2], dim=1)
 		eval_preds, winner_preds = final(conc)
 		mlp_preds = eval_preds.cpu().numpy()
 
@@ -420,49 +414,49 @@ if __name__ == "__main__":
 	print(f"  R2:   {mlp_metrics['r2']:.4f}")
 
 	print()
-	models_to_export = [
-		("P1", shared1),
-		("P2", shared2),
-		("A", adj_net),
-		("F", final)
-	]
+	def write_module_weights(f, named_params, prefix, start_layer):
+		"""Write weights for one module, returns next_layer index."""
+		next_layer = start_layer
+		last_bias_layer = None
+		for name, p in named_params:
+			arr = p.detach().cpu().numpy()
+			is_final_last_w = name.endswith("net.4.weight")
+			is_final_last_b = name.endswith("net.4.bias")
+			if arr.ndim == 2:
+				# if this is the final layer producing 2 outputs, keep only the first row (eval head)
+				if is_final_last_w and arr.shape[0] == 2:
+					arr_print = arr[0:1, :]
+				else:
+					arr_print = arr
+				r, c = arr_print.shape
+				ident = f"{prefix}W{next_layer}{next_layer+1}"
+				rows = []
+				for row in arr_print:
+					rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
+				body = "[\n  " + ",\n  ".join(rows) + "\n]"
+				f.write(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n\n")
+				last_bias_layer = next_layer + 1
+				next_layer += 1
+			elif arr.ndim == 1:
+				# if this is the final bias for the 2-output layer, keep only the first element
+				if is_final_last_b and arr.shape[0] == 2:
+					arr_print = arr[:1]
+				else:
+					arr_print = arr
+				n = arr_print.shape[0]
+				layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
+				ident = f"{prefix}B{layer_idx}"
+				body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr_print) + "]"
+				f.write(f"\tconst {ident}: [f32; {n}] = {body};\n\n")
+		return next_layer
 
 	rust_out_path = "logs/eval_mlp.rs"
 	with open(rust_out_path, "w") as f:
-		for prefix, model in models_to_export:
-			next_layer = 0
-			last_bias_layer = None
-			for name, p in model.named_parameters():
-				arr = p.detach().cpu().numpy()
-				# Last layer of 'F' is net.6 (linear layers at 0, 2, 4, 6)
-				is_final_last_w = (prefix == "F" and name.endswith("net.6.weight"))
-				is_final_last_b = (prefix == "F" and name.endswith("net.6.bias"))
-				
-				if arr.ndim == 2:
-					# if this is the final layer producing 2 outputs, keep only the first row (eval head)
-					if is_final_last_w and arr.shape[0] == 2:
-						arr_print = arr[0:1, :]
-					else:
-						arr_print = arr
-					r, c = arr_print.shape
-					ident = f"{prefix}_W{next_layer}{next_layer+1}"
-					rows = []
-					for row in arr_print:
-						rows.append("[" + ", ".join(f"{float(x):.8e}f32" for x in row) + "]")
-					body = "[\n  " + ",\n  ".join(rows) + "\n]"
-					f.write(f"\tconst {ident}: [[f32; {c}]; {r}] = {body};\n\n")
-					last_bias_layer = next_layer + 1
-					next_layer += 1
-				elif arr.ndim == 1:
-					# if this is the final bias for the 2-output layer, keep only the first element
-					if is_final_last_b and arr.shape[0] == 2:
-						arr_print = arr[:1]
-					else:
-						arr_print = arr
-					n = arr_print.shape[0]
-					layer_idx = last_bias_layer if last_bias_layer is not None else next_layer
-					ident = f"{prefix}_B{layer_idx}"
-					body = "[" + ", ".join(f"{float(x):.8e}f32" for x in arr_print) + "]"
-					f.write(f"\tconst {ident}: [f32; {n}] = {body};\n\n")
-	
+		f.write("\t// --- half_a (current player) ---\n")
+		next_l = write_module_weights(f, half_a.named_parameters(), "A_", 0)
+		f.write("\t// --- half_b (opponent) ---\n")
+		next_l = write_module_weights(f, half_b.named_parameters(), "B_", 0)
+		f.write("\t// --- head ---\n")
+		write_module_weights(f, final.named_parameters(), "H_", next_l)
+
 	print(f"Rust weights written to {rust_out_path}")

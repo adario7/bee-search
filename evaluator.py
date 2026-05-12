@@ -1,15 +1,20 @@
+from os.path import split
 from arena import Engine
 import os
 import json
 from tqdm import tqdm
 import numpy as np
+from random import shuffle
 import pickle
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 
 default_engine_path = "build/release/bee-search"
 FEATURES_LEN = 12
 
-def get_engine_eval(engine_path, positions, depth=5, timeout=120):
-    engine = Engine(engine_path)
+def _worker_eval(engine_path, positions, depth, timeout, worker_id, progress_bar):
+    """Evaluate a list of positions using a single engine instance (one worker)."""
+    engine = Engine(engine_path, name=f"worker-{worker_id}")
 
     engine.send("newgame Base")
     result = engine.receive(timeout=1)
@@ -22,7 +27,7 @@ def get_engine_eval(engine_path, positions, depth=5, timeout=120):
 
     scores = []
 
-    for position in tqdm(positions):
+    for position in progress_bar:
         try:
             engine.send(f"newgame {position}")
             result = engine.receive(timeout=1)
@@ -55,7 +60,7 @@ def get_engine_eval(engine_path, positions, depth=5, timeout=120):
             print(position)
             print(e)
             engine.terminate()
-            engine = Engine(engine_path)
+            engine = Engine(engine_path, name=f"worker-{worker_id}")
             engine.send("newgame Base")
             result = engine.receive(timeout=1)
             if len(result) == 0:
@@ -67,6 +72,33 @@ def get_engine_eval(engine_path, positions, depth=5, timeout=120):
     engine.terminate()
     return scores
 
+def get_engine_eval(engine_path, positions, depth=5, timeout=120, jobs=1):
+    """Evaluate positions, optionally in parallel with `jobs` engine instances."""
+    if jobs <= 1:
+        return _worker_eval(engine_path, positions, depth, timeout, 0, tqdm(positions))
+
+    # Split positions across workers
+    chunk_size = math.ceil(len(positions) / jobs)
+    chunks = [positions[i:i + chunk_size] for i in range(0, len(positions), chunk_size)]
+
+    all_scores = []
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        futures = {}
+        for worker_id, chunk in enumerate(chunks):
+            bar = tqdm(chunk, desc=f"worker {worker_id}", position=worker_id)
+            future = executor.submit(_worker_eval, engine_path, chunk, depth, timeout, worker_id, bar)
+            futures[future] = worker_id
+
+        for future in as_completed(futures):
+            worker_id = futures[future]
+            try:
+                scores = future.result()
+                all_scores.extend(scores)
+            except Exception as e:
+                print(f"Worker {worker_id} failed: {e}")
+
+    return all_scores
+
 def load_results(results_file):
     if not os.path.exists(results_file):
         print(f"W: file {results_file} not found")
@@ -75,14 +107,17 @@ def load_results(results_file):
         return json.load(f)
 
 def get_positions_from_results(results_paths, engine):
-    positions = set()
+    group_positions = []
     winners = {}
     opp = {"white": "black", "black": "white"}
-    accepted_count = 0
-    discarded_count = 0
 
     for path in results_paths:
         print(f"Extracting positions from results in {path}...")
+        accepted_count = 0
+        discarded_count = 0
+        acc_pos = 0
+        discarded_pos = 0
+        positions = set()
         
         if path.endswith(".json"):
             results = load_results(path)
@@ -102,7 +137,9 @@ def get_positions_from_results(results_paths, engine):
                     else:
                         discarded_count += 1
 
-        for result in tqdm(results):
+        shuffle(results)
+        CAP = 10000
+        for result in tqdm(results[:CAP]):
             tmp = result["final_gamestate"].split(";")
             winner = result["winner"]
 
@@ -119,22 +156,49 @@ def get_positions_from_results(results_paths, engine):
             if len(position) == 0:
                 raise TimeoutError("Engine didn't respond")
 
+            hist = {}
             for move in moves:
+                if move not in hist: hist[move] = 0
+                hist[move] += 1
+                if hist[move] >= 5: # sometimes the engines get stuck
+                    discarded_pos += 1
+                    break
                 engine.send(f"play {move}")
                 position = engine.receive(timeout=1)
                 if len(position) == 0:
+                    discarded_pos += 1
                     raise TimeoutError("Engine didn't respond")
                 position = position[0]
                 if "invalidmove" in position:
+                    discarded_pos += 1
                     break
                 positions.add(position)
                 turn = position.split(";")[2].split("[")[0].lower()
                 relative = 1 if winner==turn else 0 if winner==opp[turn] else 0.5
                 if position not in winners: winners[position] = { 0: 0, 0.5: 0, 1: 0 }
                 winners[position][relative] += 1
+                acc_pos += 1
 
-    positions = list(positions)
-    print(f"Accepted games: {accepted_count}, Discarded games: {discarded_count}")
+        print(f"Accepted games: {accepted_count}, Discarded games: {discarded_count}")
+        print(f"Accepted positions: {acc_pos}, Discarded positions: {discarded_pos}")
+        positions = list(positions)
+        shuffle(positions)
+        group_positions.append(positions)
+
+    # we want the head of the overall list to be evenly distributed between the k groups
+    positions = []
+    positions_set = set()
+    k = len(group_positions)
+    indices = [0 for _ in range(k)]
+    while any([indices[i] < len(group_positions[i]) for i in range(k)]):
+        for i in range(len(group_positions)):
+            while indices[i] < len(group_positions[i]):
+                p = group_positions[i][indices[i]]
+                indices[i] += 1
+                if p not in positions_set:
+                    positions_set.add(p)
+                    positions.append(p)
+                    break
     print(f"Extracted {len(positions)} positions.")
 
     win_prob = {}
@@ -247,6 +311,7 @@ def get_global_features_from_positions(positions, engine):
 def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluate):
     existing_evals = load_results(evals_path)
     evals_map = {e["position"]: e for e in existing_evals}
+    print(f"Num loaded evals: {len(evals_map)}")
 
     positions_to_eval = []
     num_present_diff_params = 0
@@ -265,7 +330,6 @@ def plan_evaluation_run(all_positions, evals_path, depth, engine_name, reevaluat
             positions_to_eval.append(pos)
 
     # Print a small summary
-    print(f"Num loaded evals: {len(evals_map)}")
     print(f"Present but with different params: {num_present_diff_params}")
     print(f"Missing ones: {num_missing}")
 
@@ -290,6 +354,8 @@ if __name__ == "__main__":
                         help="Path to save the global features JSON file.")
     parser.add_argument("--graphs", type=str, default=None,
                         help="Path to save the graphs pickle file.")
+    parser.add_argument("-j", type=int, default=1,
+                        help="Number of parallel engine instances for evaluation (default: 1).")
 
     args = parser.parse_args()
 
@@ -316,7 +382,7 @@ if __name__ == "__main__":
         processed = 0
         for i in range(0, len(positions_to_eval), chunk_size):
             chunk = positions_to_eval[i:i + chunk_size]
-            evals = get_engine_eval(engine_path=args.engine, positions=chunk, depth=args.depth, timeout=args.timeout)
+            evals = get_engine_eval(engine_path=args.engine, positions=chunk, depth=args.depth, timeout=args.timeout, jobs=args.j)
             for e in evals:
                 evals_map[e["position"]] = e
                 e["winner"] = win_prob[e["position"]]
