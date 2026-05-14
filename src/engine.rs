@@ -604,12 +604,25 @@ impl Engine {
         let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);
         if verbose {
             eprintln!("[{} th] explored {} nodes in {:.4}s -> {:.3} knodes/s, in qsearch={:.1}%", num_threads, nnodes, elapsed, nnodes as f64 / elapsed / 1000.0, 100.0 * qsnodes as f64 / nnodes as f64);
+            eprint!("pv: ");
+            let mut bb = board.clone();
+            for _ in 0..16 {
+                let mv = self.tt.get(bb.zobrist_hash).map(|e| e.pv).unwrap_or(Action::Pass);
+                if mv == Action::Pass { break; }
+                eprint!("{};", bb.action_to_string(mv));
+                bb.do_action(mv);
+            }
+            eprintln!();
         }
         r
     }
 
     pub fn clear_tt(&mut self) {
         self.tt.clear();
+    }
+
+    pub fn get_pv(&self, board: &Board) -> Option<Action> {
+        self.tt.get(board.zobrist_hash).map(|e| e.pv)
     }
 
     pub fn last_nnodes(&self) -> u64 {

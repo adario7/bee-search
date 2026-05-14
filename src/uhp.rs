@@ -9,6 +9,7 @@ use crate::perft;
 
 const FORCE_ST: bool = false;
 const MAX_THREADS: usize = if FORCE_ST { 1 } else { 32 };
+const PONDER_RESP: bool = true;
 
 pub struct Uhp {
     board: Board,
@@ -61,11 +62,22 @@ impl Uhp {
     fn start_ponder(&mut self) {
         self.stop_ponder();
         if self.ponder_enabled && self.ponder_abort.is_none() {
-            eprintln!("pondering...");
+            let mut board = self.board.clone();
+
+            if PONDER_RESP {
+                if let Some(pv_move) = self.engine.get_pv(&board) {
+                    eprintln!("pondering on reponse {}...", board.action_to_string(pv_move));
+                    board.do_action(pv_move);
+                } else {
+                    eprintln!("pondering on the opponent's board (no pv available)...");
+                }
+            } else {
+                eprintln!("pondering on the opponent's board...");
+            }
+
             let abort = Arc::new(AtomicBool::new(false));
             self.ponder_abort = Some(abort.clone());
             let engine = self.engine.clone();
-            let mut board = self.board.clone();
             let num_threads = self.num_threads;
             std::thread::spawn(move || {
                 engine.best_move(&mut board, 30, Duration::from_secs(3600), num_threads, false, Some(abort));
@@ -147,6 +159,7 @@ impl Uhp {
         for _ in 0..num_undo {
             self.board.undo_action();
         }
+        self.stop_ponder();
         println!("{}", self.board.game_string());
         Ok(())
     }
