@@ -533,7 +533,11 @@ impl Engine {
         td.abort.store(true, atomic::Ordering::Relaxed);
     }
 
-    fn lazy_smp(self: Arc<Self>, board: &mut Board, max_depth: Depth, deadline: Instant, num_threads: usize, verbose: bool) -> (Value, Action) {
+    fn lazy_smp(self: Arc<Self>, board: &mut Board, max_depth: Depth, deadline: Instant, num_threads: usize, verbose: bool, abort_signal: Option<Arc<AtomicBool>>) -> (Value, Action) {
+        let root_tt = self.tt.get(board.zobrist_hash);
+        if verbose {
+            eprintln!("root TT entry has depth {}", root_tt.map_or(0, |e| e.depth));
+        }
         self.tt.clear_one(board.zobrist_hash); // make sure the root TT slot is available
 
         // reset move votes
@@ -543,7 +547,7 @@ impl Engine {
         }
     
         thread::scope(|scope| {
-            let abort = Arc::new(AtomicBool::new(false));
+            let abort = abort_signal.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
             let compl = Arc::new(AtomicU8::new(0));
             for i in 0..num_threads {
                 let th_engine = self.clone();
@@ -589,12 +593,12 @@ impl Engine {
         (value, best_move)
     }
 
-    pub fn best_move(self: Arc<Self>, board: &mut Board, max_depth: Depth, max_time: Duration, num_threads: usize, verbose: bool) -> (Value, Action) {
+    pub fn best_move(self: Arc<Self>, board: &mut Board, max_depth: Depth, max_time: Duration, num_threads: usize, verbose: bool, abort: Option<Arc<AtomicBool>>) -> (Value, Action) {
         let start = Instant::now();
         self.nnodes.store(0, atomic::Ordering::Relaxed);
         self.qsnodes.store(0, atomic::Ordering::Relaxed);
         let deadline = start + max_time;
-        let r = self.clone().lazy_smp(board, max_depth, deadline, num_threads, verbose);
+        let r = self.clone().lazy_smp(board, max_depth, deadline, num_threads, verbose, abort);
         let elapsed = start.elapsed().as_secs_f64();
         let nnodes = self.nnodes.load(atomic::Ordering::Relaxed);
         let qsnodes = self.qsnodes.load(atomic::Ordering::Relaxed);

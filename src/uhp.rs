@@ -1,5 +1,5 @@
 use std::io::stdin;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 use crate::board::Board;
@@ -14,6 +14,8 @@ pub struct Uhp {
     board: Board,
     engine: Arc<Engine>,
     num_threads: usize,
+    ponder_enabled: bool,
+    ponder_abort: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug)]
@@ -44,7 +46,30 @@ impl Uhp {
         Uhp {
             board: Board::new(),
             engine: Arc::new(Engine::new()),
-            num_threads: n.min(MAX_THREADS)
+            num_threads: n.min(MAX_THREADS),
+            ponder_enabled: true,
+            ponder_abort: None,
+        }
+    }
+
+    fn stop_ponder(&mut self) {
+        if let Some(abort) = self.ponder_abort.take() {
+            abort.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn start_ponder(&mut self) {
+        self.stop_ponder();
+        if self.ponder_enabled && self.ponder_abort.is_none() {
+            eprintln!("pondering...");
+            let abort = Arc::new(AtomicBool::new(false));
+            self.ponder_abort = Some(abort.clone());
+            let engine = self.engine.clone();
+            let mut board = self.board.clone();
+            let num_threads = self.num_threads;
+            std::thread::spawn(move || {
+                engine.best_move(&mut board, 30, Duration::from_secs(3600), num_threads, false, Some(abort));
+            });
         }
     }
 
@@ -62,6 +87,7 @@ impl Uhp {
     }
 
     fn new_game(&mut self, args: &str) -> UhpResult<()> {
+        self.stop_ponder();
         self.board = Board::parse_game_string(args)?;
         println!("{}", self.board.game_string());
         Ok(())
@@ -72,8 +98,9 @@ impl Uhp {
         if !self.board.is_legal(m) {
             return Err(UhpError::InvalidMove(args.to_string()));
         }
-        self.board.do_action(m); // TODO: check for illegal moves
+        self.board.do_action(m);
         println!("{}", self.board.game_string());
+        self.start_ponder();
         Ok(())
     }
 
@@ -91,6 +118,7 @@ impl Uhp {
     }
 
     fn best_move(&mut self, args: &str) -> UhpResult<()> {
+        self.stop_ponder();
         let (depth, time) = if let Some(arg) = args.strip_prefix("depth ") {
             let depth = arg.parse::<Depth>().map_err(|_| UhpError::SyntaxError(args.to_string()))?;
             (depth, Duration::from_secs(99999))
@@ -102,7 +130,7 @@ impl Uhp {
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
-        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads, true);
+        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads, true, None);
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -125,11 +153,15 @@ impl Uhp {
 
     fn print_options(&mut self) {
         println!("NumThreads;int;{};{};1;{}", self.num_threads, num_cpus::get(), MAX_THREADS);
+        println!("Ponder;check;{}", if self.ponder_enabled { "true" } else { "false" });
     }
 
     fn get_option(&mut self, option: &str) -> UhpResult<()> {
         if option == "NumThreads" {
             println!("{}", self.num_threads);
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("Ponder") {
+            println!("{}", if self.ponder_enabled { "true" } else { "false" });
             return Ok(());
         }
         Err(UhpError::InvalidOption(option.into()))
@@ -141,6 +173,15 @@ impl Uhp {
             if value > 0 && value <= MAX_THREADS {
                 self.num_threads = value;
                 self.print_options();
+                return Ok(());
+            }
+        } else if option.eq_ignore_ascii_case("Ponder") {
+            if value.eq_ignore_ascii_case("true") {
+                self.ponder_enabled = true;
+                return Ok(());
+            } else if value.eq_ignore_ascii_case("false") {
+                self.ponder_enabled = false;
+                self.stop_ponder();
                 return Ok(());
             }
         }
@@ -162,17 +203,19 @@ impl Uhp {
     }
 
     fn perft(&mut self, args: &str) -> UhpResult<()> {
+        self.stop_ponder();
         let depth = args.parse::<usize>().unwrap_or(8);
         perft::display_perft(&mut self.board, depth);
         Ok(())
     }
 
     fn eval(&mut self, args: &str) -> UhpResult<()> {
+        self.stop_ponder();
         let depth = args.parse::<u8>().unwrap_or(0);
         let score = if depth == 0 {
             self.board.static_eval()
         } else {
-            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, true).0
+            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, true, None).0
         };
         println!("{}", score);
         Ok(())
