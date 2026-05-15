@@ -13,3 +13,4 @@ pub mod engine;
 pub mod tt;
 pub mod features;
 pub mod graph_nn;
+pub mod book;

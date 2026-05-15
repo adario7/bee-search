@@ -135,7 +135,7 @@ impl Board {
     }
 
 
-    fn game_log_string(&self) -> String {
+    pub fn game_log_string(&self) -> String {
         let mut board = Board::parse_game_type(&self.gametype).unwrap();
         let mut log = String::new();
         for &m in &self.turn_history {

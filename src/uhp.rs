@@ -150,6 +150,13 @@ impl Uhp {
 
     fn best_move(&mut self, args: &str) -> UhpResult<()> {
         self.stop_ponder();
+
+        if let Some(m) = crate::book::get_book_move(&self.board) {
+            eprintln!("book was used");
+            println!("{}", self.board.action_to_string(m));
+            return Ok(());
+        }
+
         let mut manage_time = false;
         let (depth, time) = if let Some(arg) = args.strip_prefix("depth ") {
             let depth = arg.parse::<Depth>().map_err(|_| UhpError::SyntaxError(args.to_string()))?;
