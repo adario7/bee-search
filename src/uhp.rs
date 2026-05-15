@@ -17,6 +17,10 @@ pub struct Uhp {
     num_threads: usize,
     ponder_enabled: bool,
     ponder_abort: Option<Arc<AtomicBool>>,
+    time_total: f64,
+    time_increment: f64,
+    time_available: f64,
+    otb_relay_time: f64,
 }
 
 #[derive(Debug)]
@@ -50,6 +54,10 @@ impl Uhp {
             num_threads: n.min(MAX_THREADS),
             ponder_enabled: true,
             ponder_abort: None,
+            time_total: 0.0,
+            time_increment: 0.0,
+            time_available: 0.0,
+            otb_relay_time: 2.0,
         }
     }
 
@@ -101,6 +109,9 @@ impl Uhp {
     fn new_game(&mut self, args: &str) -> UhpResult<()> {
         self.stop_ponder();
         self.board = Board::parse_game_string(args)?;
+        if self.time_total > 0.0 {
+            self.time_available = self.time_total;
+        }
         println!("{}", self.board.game_string());
         Ok(())
     }
@@ -122,27 +133,50 @@ impl Uhp {
     }
 
     fn parse_hhmmss(time: &str) -> Option<Duration> {
-        let mut toks = time.split(':');
-        let hours = toks.next().unwrap_or("").parse::<u64>().ok()?;
-        let minutes = toks.next().unwrap_or("").parse::<u64>().ok()?;
-        let seconds = toks.next().unwrap_or("").parse::<u64>().ok()?;
-        Some(Duration::from_secs(hours * 3600 + minutes * 60 + seconds))
+        let toks: Vec<&str> = time.split(':').collect();
+        if toks.len() == 2 {
+            let m = toks[0].parse::<u64>().ok()?;
+            let s = toks[1].parse::<u64>().ok()?;
+            Some(Duration::from_secs(m * 60 + s))
+        } else if toks.len() == 3 {
+            let h = toks[0].parse::<u64>().ok()?;
+            let m = toks[1].parse::<u64>().ok()?;
+            let s = toks[2].parse::<u64>().ok()?;
+            Some(Duration::from_secs(h * 3600 + m * 60 + s))
+        } else {
+            None
+        }
     }
 
     fn best_move(&mut self, args: &str) -> UhpResult<()> {
         self.stop_ponder();
+        let mut manage_time = false;
         let (depth, time) = if let Some(arg) = args.strip_prefix("depth ") {
             let depth = arg.parse::<Depth>().map_err(|_| UhpError::SyntaxError(args.to_string()))?;
             (depth, Duration::from_secs(99999))
         } else if let Some(arg) = args.strip_prefix("time ") {
-            let time = Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?;
+            manage_time = self.time_total > 0.0;
+            let time = if manage_time {
+                let tau = 30.0;
+                let real_inc = (self.time_increment - self.otb_relay_time).max(0.0);
+                let allocated = ((self.time_available + tau * real_inc) / tau).max(1.0);
+                eprintln!("available time: {:.2}s, allocated time: {:.2}s", self.time_available, allocated);
+                Duration::from_secs_f64(allocated)
+            } else {
+                Self::parse_hhmmss(arg).ok_or_else(|| UhpError::SyntaxError(args.to_string()))?
+            };
             // safety margin
-            let time = time - Duration::from_millis((2.0 + 2.7*(self.num_threads as f64).sqrt()).round() as u64);
+            let time = time.saturating_sub(Duration::from_millis((2.0 + 2.7*(self.num_threads as f64).sqrt()).round() as u64));
             (30, time)
         } else {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
+        let start_time = std::time::Instant::now();
         let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads, true, None);
+        let used_time = start_time.elapsed().as_secs_f64();
+        if manage_time {
+            self.time_available += - used_time - self.otb_relay_time + self.time_increment;
+        }
         println!("{}", self.board.action_to_string(m));
         Ok(())
     }
@@ -166,7 +200,10 @@ impl Uhp {
 
     fn print_options(&mut self) {
         println!("NumThreads;int;{};{};1;{}", self.num_threads, num_cpus::get(), MAX_THREADS);
-        println!("Ponder;check;{}", if self.ponder_enabled { "true" } else { "false" });
+        println!("Ponder;bool;{};true", if self.ponder_enabled { "true" } else { "false" });
+        println!("TimeTotal;int;{};0;0;100000000", self.time_total as i64);
+        println!("TimeIncrement;int;{};0;0;100000000", self.time_increment as i64);
+        println!("OtbRelayTime;double;{};0.0;0.0;100000000.0", self.otb_relay_time);
     }
 
     fn get_option(&mut self, option: &str) -> UhpResult<()> {
@@ -175,6 +212,15 @@ impl Uhp {
             return Ok(());
         } else if option.eq_ignore_ascii_case("Ponder") {
             println!("{}", if self.ponder_enabled { "true" } else { "false" });
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("TimeTotal") {
+            println!("{}", self.time_total as i64);
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("TimeIncrement") {
+            println!("{}", self.time_increment as i64);
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("OtbRelayTime") {
+            println!("{}", self.otb_relay_time);
             return Ok(());
         }
         Err(UhpError::InvalidOption(option.into()))
@@ -197,6 +243,19 @@ impl Uhp {
                 self.stop_ponder();
                 return Ok(());
             }
+        } else if option.eq_ignore_ascii_case("TimeTotal") {
+            let value = value.parse::<f64>().map_err(|_| UhpError::SyntaxError(value.into()))?;
+            self.time_total = value;
+            self.time_available = value;
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("TimeIncrement") {
+            let value = value.parse::<f64>().map_err(|_| UhpError::SyntaxError(value.into()))?;
+            self.time_increment = value;
+            return Ok(());
+        } else if option.eq_ignore_ascii_case("OtbRelayTime") {
+            let value = value.parse::<f64>().map_err(|_| UhpError::SyntaxError(value.into()))?;
+            self.otb_relay_time = value;
+            return Ok(());
         }
         Err(UhpError::InvalidOption(option.into()))
     }
@@ -213,6 +272,15 @@ impl Uhp {
             return Err(UhpError::SyntaxError(args.into()));
         }
         Ok(())
+    }
+
+    fn set_time(&mut self, args: &str) -> UhpResult<()> {
+        if let Some(t) = Self::parse_hhmmss(args) {
+            self.time_available = t.as_secs_f64();
+            Ok(())
+        } else {
+            Err(UhpError::SyntaxError(args.to_string()))
+        }
     }
 
     fn perft(&mut self, args: &str) -> UhpResult<()> {
@@ -280,6 +348,7 @@ impl Uhp {
             "undo" => self.undo(args),
             "options" => self.options(args),
             // secret commands
+            "time" => self.set_time(args),
             "perft" => self.perft(args),
             "eval" => self.eval(args),
             "graph" => self.print_graph(),
