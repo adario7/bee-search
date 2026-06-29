@@ -114,6 +114,7 @@ fn bench_search(c: &mut Criterion) {
                         Duration::from_secs(300),
                         threads,
                         false,
+                        None
                     );
                     total += t.elapsed();
                 }
