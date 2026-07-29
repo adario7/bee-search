@@ -1,10 +1,10 @@
 use std::{cell::OnceCell, cmp::{max, min}};
-use crate::{abstractions::TileSet, board::{Action, Board}, piece_type::{Pct, PCT_COUNT}, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
+use crate::{abstractions::TileSet, board::{Action, ActionList, Board}, piece_type::{Pct, PCT_COUNT}, tile::{adjacent, Direction, Tile, GRID_SIZE, TILE_ZERO}};
 
 const APPROX_MOVE_N: bool = true;
 
 impl Board {
-    fn generate_placements(&self, turns: &mut Vec<Action>) {
+    fn generate_placements(&self, turns: &mut ActionList) {
         let mut no_placement = TileSet::new();
         for &enemy in self.occupied_tiles[self.color().other().index()].iter() {
             for adj in adjacent(enemy) {
@@ -128,12 +128,15 @@ impl Board {
     }
 
     pub(crate) fn find_cut_vertexes(&mut self) -> TileSet {
-        if let Some(immovable) = self.immovable.get_if_valid(self.get_cached_hash()) {
+        // Cut vertexes are a structural property of the piece arrangement
+        // only, independent of whose turn it is to move, so the zobrist
+        // hash alone is a valid cache key here (see CachedValue).
+        if let Some(immovable) = self.immovable.get_if_valid(self.zobrist_hash) {
             return immovable.clone();
         }
 
         let immovable = self.find_cut_vertexes_unmutable();
-        self.immovable.update(self.get_cached_hash(), immovable.clone());
+        self.immovable.update(self.zobrist_hash, immovable.clone());
         immovable
     }
 
@@ -261,7 +264,7 @@ impl Board {
     }
 
     // From any bug on top of a stack.
-    fn generate_stack_walking(&self, hex: Tile, turns: &mut Vec<Action>) {
+    fn generate_stack_walking(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent_beetle(&mut buf, hex, hex) {
             turns.push(Action::Move(hex, adj));
@@ -274,7 +277,7 @@ impl Board {
     }
 
     // Jumping over contiguous linear lines of tiles.
-    fn generate_jumps(&self, hex: Tile, turns: &mut Vec<Action>) {
+    fn generate_jumps(&self, hex: Tile, turns: &mut ActionList) {
         for dir in Direction::all() {
             let mut jump = hex + *dir;
             let mut dist = 1;
@@ -314,14 +317,14 @@ impl Board {
         n
     }
 
-    fn generate_walk1(&self, hex: Tile, turns: &mut Vec<Action>) {
+    fn generate_walk1(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent(&mut buf, hex, hex) {
             turns.push(Action::Move(hex, adj));
         }
     }
 
-    fn generate_walk3(&self, orig: Tile, turns: &mut Vec<Action>) {
+    fn generate_walk3(&self, orig: Tile, turns: &mut ActionList) {
         let mut buf1 = [0; 6];
         let mut buf2 = [0; 6];
         let mut buf3 = [0; 6];
@@ -370,7 +373,7 @@ impl Board {
         n
     }
 
-    fn generate_walk_all(&self, orig: Tile, turns: &mut Vec<Action>) {
+    fn generate_walk_all(&self, orig: Tile, turns: &mut ActionList) {
         let mut visited = TileSet::new();
         let mut queue = [0; 16];
         queue[0] = orig;
@@ -450,7 +453,7 @@ impl Board {
         
     }
 
-    fn generate_ladybug(&self, hex: Tile, turns: &mut Vec<Action>) {
+    fn generate_ladybug(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf1 = [0; 6];
         let mut buf2 = [0; 6];
         let mut buf3 = [0; 6];
@@ -499,7 +502,7 @@ impl Board {
     }
 
     fn generate_throws(
-        &self, immovable: &TileSet, hex: Tile, turns: &mut Vec<Action>, throw_starts: &mut TileSet,
+        &self, immovable: &TileSet, hex: Tile, turns: &mut ActionList, throw_starts: &mut TileSet,
         throw_ends: &mut TileSet,
     ) {
         let mut starts = [0; 6];
@@ -555,7 +558,7 @@ impl Board {
         return num_starts * num_ends;
     }
 
-    fn generate_mosquito(&self, hex: Tile, turns: &mut Vec<Action>) {
+    fn generate_mosquito(&self, hex: Tile, turns: &mut ActionList) {
         let mut targets = [false; 8];
         for adj in adjacent(hex) {
             let node = self.tile(adj);
@@ -640,7 +643,7 @@ impl Board {
         n
     }
 
-    pub(crate) fn generate_movements(&mut self, turns: &mut Vec<Action>) {
+    pub(crate) fn generate_movements(&mut self, turns: &mut ActionList) {
 
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
@@ -734,8 +737,13 @@ impl Board {
     }
 
 
-    pub fn generate_moves(self: &mut Board) -> Vec<Action> {
-        let mut turns: Vec<Action> = Vec::new();
+    // Writes into a caller-provided buffer instead of returning a fresh
+    // ActionList by value. `generate_moves` below is a thin wrapper for
+    // callers that just want an owned result; hot recursive callers (e.g.
+    // perft) should call this directly with a buffer they reuse across the
+    // whole recursion, to avoid copying the ~1.5KB ActionList on every return.
+    pub fn generate_moves_into(self: &mut Board, turns: &mut ActionList) {
+        turns.clear();
         let remaining = self.placeable[self.color().index()];
         if self.turn_num < 2 {
             // Special case for the first 2 turns:
@@ -756,21 +764,25 @@ impl Board {
                     }
                 }
             }
-            return turns;
+            return;
         }
         // Once queen has been placed, pieces may move.
         if remaining[Pct::Queen as usize] == 0 {
             // For movable pieces, generate all legal moves.
-            self.generate_movements(&mut turns);
+            self.generate_movements(turns);
         }
         if remaining.iter().any(|&num| num > 0) {
             // Find placeable positions.
-            self.generate_placements(&mut turns);
+            self.generate_placements(turns);
         }
         if turns.is_empty() {
             turns.push(Action::Pass);
         }
+    }
 
+    pub fn generate_moves(self: &mut Board) -> ActionList {
+        let mut turns = ActionList::new();
+        self.generate_moves_into(&mut turns);
         turns
     }
 

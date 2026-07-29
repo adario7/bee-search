@@ -1,4 +1,4 @@
-use crate::{abstractions::TileSet, board::{Action, Board}, piece::Color, piece_type::PCT_COUNT, tile::adjacent};
+use crate::{abstractions::TileSet, board::{Action, ActionList, Board}, piece::Color, piece_type::PCT_COUNT, tile::adjacent};
 
 impl Board {
     pub const FN: usize = 4 + PCT_COUNT*6;
@@ -74,7 +74,7 @@ impl Board {
         self.features_for_both(my_n)
     }
 
-    pub fn features_fast(&mut self, moves: &Vec<Action>) -> [i16; Self::FN2] {
+    pub fn features_fast(&mut self, moves: &ActionList) -> [i16; Self::FN2] {
         let mut my_n = [0; PCT_COUNT];
         for action in moves {
             if let Action::Move(from, _) = action {

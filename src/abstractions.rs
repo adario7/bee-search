@@ -1,5 +1,3 @@
-use crate::piece::Color;
-
 use crate::tile::{Tile, GRID_SIZE};
 use crate::board::Action;
 use std::collections::HashSet;
@@ -20,10 +18,6 @@ impl TileSet {
 
     pub(crate) fn set(&mut self, tile: Tile) {
         self.table[tile as usize & TILESET_MASK] |= 1 << (tile as u32 >> TILESET_SHIFT);
-    }
-
-    pub(crate) fn rem(&mut self, tile: Tile) {
-        self.table[tile as usize & TILESET_MASK] &= !(1 << (tile as u32 >> TILESET_SHIFT));
     }
 
     pub(crate) fn get(&self, tile: Tile) -> bool {
@@ -70,20 +64,14 @@ impl ActionContainer {
 
 }
 
+// Keyed only by zobrist_hash: the cached values stored here (e.g. cut
+// vertexes) are structural properties of the piece arrangement and do not
+// depend on which color is to move, so board_color must never be part of
+// the key (it used to be, which forced a cache miss - and a full
+// recomputation - every time the "other side"'s mobility was probed for
+// evaluation features, even though the board had not changed).
 #[derive(Debug, Clone)]
-pub struct CacheHash {
-    pub zobrist_hash: u64,
-    pub board_color: Color,
-}
-
-impl PartialEq<CacheHash> for CacheHash {
-    fn eq(&self, other: &CacheHash) -> bool {
-        self.zobrist_hash == other.zobrist_hash && self.board_color == other.board_color
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CachedValue<T>(Option<(CacheHash, T)>);
+pub struct CachedValue<T>(Option<(u64, T)>);
 
 impl<T> CachedValue<T>
 where
@@ -93,7 +81,7 @@ where
         Self(None)
     }
 
-    pub fn get_if_valid(&self, current_hash: CacheHash) -> Option<&T> {
+    pub fn get_if_valid(&self, current_hash: u64) -> Option<&T> {
         if let Some((cached_hash, cached_result)) = &self.0 {
             if *cached_hash == current_hash {
                 return Some(cached_result);
@@ -102,41 +90,41 @@ where
         None
     }
 
-    pub fn update(&mut self, current_hash: CacheHash, value: T) {
+    pub fn update(&mut self, current_hash: u64, value: T) {
         self.0 = Some((current_hash, value));
     }
 
-    pub fn is_valid(&self, current_hash: CacheHash) -> bool {
+    pub fn is_valid(&self, current_hash: u64) -> bool {
         self.0.as_ref().map_or(false, |x| x.0 == current_hash)
     }
 
 }
 
+// No accompanying bitset for O(1) `.contains()` (unlike an earlier version
+// of this code): every tile is removed from its previous color's set
+// before being added to its new color's set (see Board::add_piece /
+// remove_piece), so a tile can never be pushed here while already present
+// - the duplicate-guard this used to carry (a `.contains()` check backed by
+// a 128-byte-per-color TileSet, set/cleared on every single push/remove)
+// was provably dead weight. Matches nokamute's plain `Vec<Hex>` here.
 #[derive(Clone)]
 pub struct OccupancyVec {
     pub occupants: Vec<Tile>,
-    pub occupants_set: TileSet,
 }
 
 impl OccupancyVec {
     pub fn new() -> Self {
-        OccupancyVec { 
+        OccupancyVec {
             occupants: Vec::new(),
-            occupants_set: TileSet::new(),
         }
     }
 
-    pub fn contains(&self, tile: &Tile) -> bool {
-        return self.occupants_set.get(*tile);
-    }
-
     pub fn push(&mut self, tile: Tile) {
-        self.occupants_set.set(tile);
+        debug_assert!(!self.occupants.contains(&tile));
         self.occupants.push(tile);
     }
 
     pub fn remove(&mut self, tile: Tile) {
-        self.occupants_set.rem(tile);
         self.occupants.swap_remove(self.occupants.iter().position(|&x| x == tile).unwrap());
     }
 
