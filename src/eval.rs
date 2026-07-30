@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board}, eval_mlp::mlp_inference, tile::adjacent};
+use crate::{board::{ActionList, Board}, eval_mlp::mlp_inference, tile::adjacent};
 
 pub type Eval = i16;
 pub type Value = Eval;
@@ -31,7 +31,7 @@ impl Board {
         self.static_eval_fast(&my_moves_n)
     }
 
-    pub fn static_eval_fast(&mut self, my_moves: &Vec<Action>) -> Eval {
+    pub fn static_eval_fast(&mut self, my_moves: &ActionList) -> Eval {
         if MLP_EVAL {
             let f = self.features_fast(my_moves);
             mlp_inference(&f)

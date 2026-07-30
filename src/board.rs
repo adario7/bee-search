@@ -7,6 +7,101 @@ use crate::piece_type::{Pct, PieceType};
 use crate::abstractions::*;
 use std::sync::OnceLock;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnderPiece {
+    pub tile: Tile,
+    pub piece: Piece,
+}
+impl Default for UnderPiece {
+    fn default() -> Self {
+        Self {
+            tile: 0,
+            piece: Piece::empty(),
+        }
+    }
+}
+
+// Backed by `MaybeUninit` rather than `[Action; 256]`: constructing a fresh
+// ActionList used to write all 256 slots (~1.5KB) up front via `[Action::Pass; 256]`
+// even though only the first `len` are ever read (everything derefs to
+// `&moves[..len]`). That happened on every single `generate_moves()` call -
+// millions of times during search/perft - for pure write-then-never-read work.
+// With MaybeUninit, `new()` is a no-op and only pushed slots are written.
+#[derive(Clone, Copy)]
+pub struct ActionList {
+    moves: [std::mem::MaybeUninit<Action>; 256],
+    len: usize,
+}
+impl ActionList {
+    pub fn new() -> Self {
+        // SAFETY: an array of `MaybeUninit<T>` has no validity invariant on
+        // its elements, so leaving it uninitialized here is always sound;
+        // only `moves[..len]`, which `push` always initializes, is ever read.
+        Self { moves: unsafe { std::mem::MaybeUninit::uninit().assume_init() }, len: 0 }
+    }
+    pub fn push(&mut self, action: Action) {
+        debug_assert!(self.len < 256);
+        self.moves[self.len] = std::mem::MaybeUninit::new(action);
+        self.len += 1;
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Action {
+        debug_assert!(index < self.len);
+        // SAFETY: index and len-1 are both < self.len, hence initialized.
+        let val = unsafe { self.moves[index].assume_init() };
+        self.moves[index] = self.moves[self.len - 1];
+        self.len -= 1;
+        val
+    }
+    pub fn retain<F>(&mut self, mut f: F) where F: FnMut(&Action) -> bool {
+        let mut i = 0;
+        while i < self.len {
+            // SAFETY: i < self.len, hence initialized.
+            let keep = f(unsafe { self.moves[i].assume_init_ref() });
+            if !keep {
+                self.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+    fn as_slice(&self) -> &[Action] {
+        // SAFETY: `push` is the only way to grow `len`, and it always
+        // initializes the slot it claims, so moves[..len] is initialized.
+        unsafe { std::slice::from_raw_parts(self.moves.as_ptr() as *const Action, self.len) }
+    }
+    fn as_mut_slice(&mut self) -> &mut [Action] {
+        // SAFETY: see as_slice.
+        unsafe { std::slice::from_raw_parts_mut(self.moves.as_mut_ptr() as *mut Action, self.len) }
+    }
+}
+impl std::ops::Deref for ActionList {
+    type Target = [Action];
+    fn deref(&self) -> &[Action] { self.as_slice() }
+}
+impl std::ops::DerefMut for ActionList {
+    fn deref_mut(&mut self) -> &mut [Action] { self.as_mut_slice() }
+}
+impl<'a> IntoIterator for &'a ActionList {
+    type Item = &'a Action;
+    type IntoIter = std::slice::Iter<'a, Action>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+impl IntoIterator for ActionList {
+    type Item = Action;
+    type IntoIter = std::vec::IntoIter<Action>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().to_vec().into_iter()
+    }
+}
+
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
@@ -30,9 +125,9 @@ pub struct Board {
     pub gametype: String,
     // the piece on each tile of the board, for stacks: to topmost piece
     pub world: [Piece; GRID_SIZE],
-    // stacked pieces, from bottom to top (index 0 = bottom, underworld_depth-1 = top)
-    pub underworld: [[Piece; 8]; GRID_SIZE], // aka "sottobosco"
-    pub underworld_depth: [u8; GRID_SIZE],
+    // stacked pieces
+    pub underworld: [UnderPiece; 32],
+    pub underworld_size: u8,
     // remaining pieces still to be placed
     pub placeable: [[u8; 8]; 2],
     // position of the queens
@@ -86,8 +181,8 @@ impl Board {
                     "".to_string()
                 }),
             world: [Piece::empty(); GRID_SIZE],
-            underworld: [[Piece::empty(); 8]; GRID_SIZE],
-            underworld_depth: [0; GRID_SIZE],
+            underworld: [UnderPiece::default(); 32],
+            underworld_size: 0,
             placeable: [[1, 3, 2, 3, 2, m, l, p], [1, 3, 2, 3, 2, m, l, p]], //TODO: doesn't consider values of TOT_QTY
             queens: [None, None],
             occupied_tiles: [OccupancyVec::new(), OccupancyVec::new()],
@@ -107,23 +202,32 @@ impl Board {
     }
 
     pub fn tile(&self, tile: Tile) -> Piece {
-        self.world[tile as usize]
+        // SAFETY: every Tile value flowing through this codebase is
+        // produced either by TILE_ZERO or by `Add<Direction>`, which always
+        // masks with GRID_MASK (< GRID_SIZE) - never a raw, unmasked value.
+        debug_assert!((tile as usize) < GRID_SIZE);
+        unsafe { *self.world.get_unchecked(tile as usize) }
     }
 
     pub fn occupied(&self, tile: Tile) -> bool {
-        self.height[tile as usize] > 0
+        // Equivalent to `self.height[tile] > 0` by invariant (a tile has a
+        // piece on top iff its height is nonzero), but reads `world`
+        // instead of a second, separate 1024-entry array - `world` is
+        // already what most movegen call sites touch for the same tile.
+        self.tile(tile).is_some()
     }
 
     pub fn queen_required(&self) -> bool {
-        self.turn_num > 5 && self.placeable[self.color().index()][PieceType::Queen as usize] > 0 
+        self.turn_num > 5 && self.placeable[self.color().index()][PieceType::Queen as usize] > 0
     }
 
     pub fn height(&self, tile: Tile) -> i32 {
-        self.height[tile as usize] as i32
-    } 
+        // SAFETY: see tile() above - Tile is always < GRID_SIZE by construction.
+        (unsafe { *self.height.get_unchecked(tile as usize) }) as i32
+    }
 
     pub fn is_stacked(&self, tile: Tile) -> bool {
-        self.height[tile as usize] > 1
+        self.height(tile) > 1
     }
 
     fn zobrist(&self, t: Tile, p: Piece, h: u32) -> u64 {
@@ -132,10 +236,7 @@ impl Board {
     }
 
     fn add_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
-        let vec = &mut occupied_hexes[p.color().index()];
-        if !vec.contains(&t) {
-            vec.push(t);
-        }
+        occupied_hexes[p.color().index()].push(t);
     }
 
     fn remove_occupancy(occupied_hexes: &mut [OccupancyVec; 2], p: Piece, t: Tile) {
@@ -143,17 +244,22 @@ impl Board {
         vec.remove(t);
     }
 
-    pub fn underworld_at(&self, tile: Tile) -> &[Piece] {
-        let d = self.underworld_depth[tile as usize] as usize;
-        &self.underworld[tile as usize][..d]
+    pub fn underworld_at(&self, tile: Tile) -> Vec<Piece> {
+        let mut res = Vec::new();
+        for i in 0..self.underworld_size as usize {
+            if self.underworld[i].tile == tile {
+                res.push(self.underworld[i].piece);
+            }
+        }
+        res
     }
 
     fn add_piece(&mut self, tile: Tile, piece: Piece) {
         let curr = &mut self.world[tile as usize];
         if curr.is_some() {
-            let d = self.underworld_depth[tile as usize] as usize;
-            self.underworld[tile as usize][d] = *curr;
-            self.underworld_depth[tile as usize] += 1;
+            debug_assert!((self.underworld_size as usize) < 32);
+            self.underworld[self.underworld_size as usize] = UnderPiece { tile, piece: *curr };
+            self.underworld_size += 1;
             Self::remove_occupancy(&mut self.occupied_tiles, *curr, tile);
         }
         *curr = piece;
@@ -168,7 +274,7 @@ impl Board {
     }
 
     fn remove_piece(&mut self, tile: Tile) {
-        
+
         self.zobrist_hash ^= self.zobrist(tile, self.world[tile as usize], self.height(tile) as u32);
 
         self.height[tile as usize] -= 1;
@@ -180,18 +286,29 @@ impl Board {
             self.queens[curr.color().index()] = None;
         }
         Self::remove_occupancy(&mut self.occupied_tiles, *curr, tile);
-        let d = self.underworld_depth[tile as usize];
-        if d > 0 {
-            self.underworld_depth[tile as usize] -= 1;
-            *curr = self.underworld[tile as usize][d as usize - 1];
-            Self::add_occupancy(&mut self.occupied_tiles, *curr, tile); // the uncovered piece may have a different color
+
+        if self.height[tile as usize] > 0 {
+            let mut found = false;
+            for i in (0..self.underworld_size as usize).rev() {
+                if self.underworld[i].tile == tile {
+                    *curr = self.underworld[i].piece;
+                    for j in i..(self.underworld_size as usize - 1) {
+                        self.underworld[j] = self.underworld[j + 1];
+                    }
+                    self.underworld_size -= 1;
+                    Self::add_occupancy(&mut self.occupied_tiles, *curr, tile);
+                    found = true;
+                    break;
+                }
+            }
+            debug_assert!(found);
         } else {
             *curr = Piece::empty();
         }
     }
 
     fn do_move(&mut self, from: Tile, to: Tile) {
-        let piece = self.world[from as usize];
+        let piece = self.tile(from);
         debug_assert!(piece.is_some());
         debug_assert_ne!(from, to);
         self.remove_piece(from);
@@ -298,10 +415,6 @@ impl Board {
         !self.is_noisy(action)
     }
 
-    pub fn get_cached_hash(&self) -> CacheHash {
-        CacheHash {zobrist_hash: self.zobrist_hash, board_color: self.color()}
-    }
-
     pub fn all_occupied_tiles(&self) -> impl Iterator<Item = Tile> + '_ {
         self.occupied_tiles[self.color().index()].iter().copied().chain(self.occupied_tiles[self.color().other().index()].iter().copied())
     }
@@ -326,7 +439,7 @@ mod test {
         board.do_action(Action::Move(a, b));
         assert_eq!(board.world[a as usize], Piece::empty());
         assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
-        assert_eq!(board.underworld[b as usize][0], Piece::make(Color::Black, PieceType::Queen, 1));
+        assert_eq!(board.underworld_at(b)[0], Piece::make(Color::Black, PieceType::Queen, 1));
         board.undo_action();
         assert_eq!(board.world[a as usize], Piece::make(Color::White, PieceType::Queen, 1));
         assert_eq!(board.world[b as usize], Piece::make(Color::Black, PieceType::Queen, 1));
@@ -366,15 +479,10 @@ mod test {
                     return false;
                 }
 
-                let d1 = b1.underworld_depth[*tile as usize] as usize;
-                let d2 = b2.underworld_depth[*tile as usize] as usize;
-                if d1 != d2 { return false; }
-                for j in 0..d1 {
-                    if b1.underworld[*tile as usize][j] != b2.underworld[*tile as usize][j] {
-                        return false;
-                    }
+                if b1.underworld_at(*tile) != b2.underworld_at(*tile) {
+                    return false;
                 }
-                
+
                 if b1.world[*tile as usize] != b2.world[*tile as usize] {
                     return false;
                 }
@@ -390,7 +498,7 @@ mod test {
         let mut b1 = Board::new();
         let mut b2 = Board::new();
 
-        
+
         let depth = 50;
         let num_runs = 100;
         let num_tries = 100;
@@ -409,14 +517,14 @@ mod test {
                 let moves = b1.generate_moves();
 
                 if moves.len() > 0 {
-                    
+
                     for _i in 0..num_tries {
                         let m1 = rng.random_range(0..moves.len());
                         let m2 = rng.random_range(0..moves.len());
 
                         b1.do_action(moves[m1]);
                         b2.do_action(moves[m2]);
-                        
+
                         assert_eq!(compare_boards(&mut b1, &mut b2), b1.zobrist_hash == b2.zobrist_hash);
 
                         b1.undo_action();

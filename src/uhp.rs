@@ -13,7 +13,12 @@ const PONDER_RESP: bool = true;
 
 pub struct Uhp {
     board: Board,
-    engine: Arc<Engine>,
+    // Lazily constructed: Engine::new() allocates a 256MB transposition
+    // table up front, which costs real, measurable time (tens of ms) - pure
+    // overhead for commands that never touch the engine at all, like
+    // `perft`, `newgame`, `info` or `validmoves`. Only `play` (via
+    // start_ponder), `bestmove`, and `eval <depth>=0` need it.
+    engine: Option<Arc<Engine>>,
     num_threads: usize,
     ponder_enabled: bool,
     ponder_abort: Option<Arc<AtomicBool>>,
@@ -50,7 +55,7 @@ impl Uhp {
         let n = num_cpus::get();
         Uhp {
             board: Board::new(),
-            engine: Arc::new(Engine::new()),
+            engine: None,
             num_threads: n.min(MAX_THREADS),
             ponder_enabled: true,
             ponder_abort: None,
@@ -59,6 +64,10 @@ impl Uhp {
             time_available: 0.0,
             otb_relay_time: 2.0,
         }
+    }
+
+    fn engine(&mut self) -> Arc<Engine> {
+        self.engine.get_or_insert_with(|| Arc::new(Engine::new())).clone()
     }
 
     fn stop_ponder(&mut self) {
@@ -73,7 +82,7 @@ impl Uhp {
             let mut board = self.board.clone();
 
             if PONDER_RESP {
-                if let Some(pv_move) = self.engine.get_pv(&board) {
+                if let Some(pv_move) = self.engine().get_pv(&board) {
                     eprintln!("pondering on reponse {}...", board.action_to_string(pv_move));
                     board.do_action(pv_move);
                 } else {
@@ -85,7 +94,7 @@ impl Uhp {
 
             let abort = Arc::new(AtomicBool::new(false));
             self.ponder_abort = Some(abort.clone());
-            let engine = self.engine.clone();
+            let engine = self.engine();
             let num_threads = self.num_threads;
             std::thread::spawn(move || {
                 engine.best_move(&mut board, 30, Duration::from_secs(3600), num_threads, false, Some(abort));
@@ -179,7 +188,7 @@ impl Uhp {
             return Err(UhpError::SyntaxError(args.to_string()));
         };
         let start_time = std::time::Instant::now();
-        let (_, m) = self.engine.clone().best_move(&mut self.board, depth, time, self.num_threads, true, None);
+        let (_, m) = self.engine().best_move(&mut self.board, depth, time, self.num_threads, true, None);
         let used_time = start_time.elapsed().as_secs_f64();
         if manage_time {
             self.time_available += - used_time - self.otb_relay_time + self.time_increment;
@@ -303,7 +312,7 @@ impl Uhp {
         let score = if depth == 0 {
             self.board.static_eval()
         } else {
-            self.engine.clone().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, true, None).0
+            self.engine().best_move(&mut self.board, depth, Duration::from_secs(99999), self.num_threads, true, None).0
         };
         println!("{}", score);
         Ok(())

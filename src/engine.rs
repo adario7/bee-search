@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board, GameResult}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
+use crate::{board::{Action, Board, GameResult, ActionList}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
 use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc}, time::{Duration, Instant}, u64, usize};
 use crossbeam::thread;
 
@@ -43,6 +43,14 @@ pub struct ThreadData {
     countermove: Vec<Action>,
     local_nodes: u64,
     last_vote: Option<(Action, u64)>,
+    // One reused buffer per ply (indexed by `ply`, which fits in a Depth/u8)
+    // instead of a fresh ActionList/MoveInfoList being constructed and
+    // copied out of generate_moves()/order_moves() on every node - the
+    // same fix already applied to perft's recursion. IID recurses at the
+    // *same* ply before the outer call touches its own slot, which is fine:
+    // usage is sequential, never concurrent, at a given index.
+    move_bufs: Vec<ActionList>,
+    order_bufs: Vec<MoveInfoList>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +59,43 @@ struct MoveInfo {
     quiet: bool,
     killer: u8,
     hist: i64
+}
+
+// Backed by MaybeUninit for the same reason as ActionList (see board.rs):
+// avoids zero-initializing all 256 slots on every construction when only
+// the first `len` are ever read.
+struct MoveInfoList {
+    moves: [std::mem::MaybeUninit<MoveInfo>; 256],
+    len: usize,
+}
+impl MoveInfoList {
+    fn new() -> Self {
+        // SAFETY: see ActionList::new in board.rs - MaybeUninit<T> arrays
+        // have no validity invariant, and only moves[..len] (always
+        // initialized by push) is ever read.
+        Self { moves: unsafe { std::mem::MaybeUninit::uninit().assume_init() }, len: 0 }
+    }
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+    fn push(&mut self, mvi: MoveInfo) {
+        debug_assert!(self.len < 256);
+        self.moves[self.len] = std::mem::MaybeUninit::new(mvi);
+        self.len += 1;
+    }
+    fn as_slice(&self) -> &[MoveInfo] {
+        unsafe { std::slice::from_raw_parts(self.moves.as_ptr() as *const MoveInfo, self.len) }
+    }
+    fn as_mut_slice(&mut self) -> &mut [MoveInfo] {
+        unsafe { std::slice::from_raw_parts_mut(self.moves.as_mut_ptr() as *mut MoveInfo, self.len) }
+    }
+}
+impl std::ops::Deref for MoveInfoList {
+    type Target = [MoveInfo];
+    fn deref(&self) -> &[MoveInfo] { self.as_slice() }
+}
+impl std::ops::DerefMut for MoveInfoList {
+    fn deref_mut(&mut self) -> &mut [MoveInfo] { self.as_mut_slice() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,16 +188,27 @@ impl Engine {
         soft
     }*/
 
-    fn order_moves(&self, moves: Vec<Action>, td: &mut ThreadData, pv: Option<Action>, killers: &KillerT) -> Vec<MoveInfo> {
+    // Takes the fields it needs individually rather than `td: &mut
+    // ThreadData` as a whole, so a caller can hold `&mut td.order_bufs[ply]`
+    // (the `out` buffer, reused across nodes) at the same time as `&td.board`
+    // etc. - all disjoint fields of the same ThreadData, which the borrow
+    // checker allows, but only when expressed as separate field paths like
+    // this rather than through one opaque `&mut ThreadData` parameter.
+    fn order_moves(&self, moves: &[Action], board: &Board, history_h: &[i64], countermove: &[Action], pv: Option<Action>, killers: &KillerT, out: &mut MoveInfoList) {
+        out.clear();
         let pv = pv.unwrap_or(Action::Pass);
-        let countermove = td.countermove[Self::last_move_index(&td.board)];
-        let mut moves = moves.into_iter()
-            .map(|mv| MoveInfo { mv,
-                quiet: td.board.is_quiet(&mv),
+        let countermove_mv = countermove[Self::last_move_index(board)];
+        for &mv in moves {
+            out.push(MoveInfo {
+                mv,
+                quiet: board.is_quiet(&mv),
                 killer: killers.iter().find(|(m, _)| *m == mv).map(|(_, i)| *i).unwrap_or(0),
-                hist: td.history_h[Self::hist_index(td.board.color(), mv)] })
-            .collect::<Vec<_>>();
-        moves.sort_by(|a, b| {
+                hist: history_h[Self::hist_index(board.color(), mv)]
+            });
+        }
+        // Unstable is fine and faster: moves that compare equal are
+        // interchangeable for search purposes, no ordering among them matters.
+        out.sort_unstable_by(|a, b| {
             // 1) PV
             if a.mv == pv {
                 return Ordering::Less;
@@ -174,17 +230,18 @@ impl Engine {
                 return b.hist.cmp(&a.hist);
             }
             // 5) countermove
-            if a.mv == countermove {
+            if a.mv == countermove_mv {
                 return Ordering::Less;
-            } else if b.mv == countermove {
+            } else if b.mv == countermove_mv {
                 return Ordering::Greater;
             }
             return Ordering::Equal;
         });
-        moves
     }
 
-    fn update_heuristics(&self, td: &mut ThreadData, depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
+    // See order_moves above for why this takes individual fields instead of
+    // `td: &mut ThreadData` - it's called with `&td.order_bufs[ply]` live.
+    fn update_heuristics(&self, board: &Board, history_h: &mut [i64], countermove: &mut [Action], depth: Depth, alpha: Value, beta: Value, killers: &mut KillerT, pv: Option<Action>, mvi: MoveInfo, moves: &[MoveInfo], explored_quiet: i64) {
         let mv = mvi.mv;
         if alpha >= beta && mvi.quiet && Some(mv) != pv {
             // remember killer move
@@ -196,16 +253,16 @@ impl Engine {
                 *cnt = 1;
             }
             // remember countermove
-            td.countermove[Self::last_move_index(&td.board)] = mv;
+            countermove[Self::last_move_index(board)] = mv;
             // add history bonus
             let bonus = (1 as i64) << depth;
-            td.history_h[Self::hist_index(td.board.color(), mv)] += bonus;
+            history_h[Self::hist_index(board.color(), mv)] += bonus;
             for prev in moves.iter() {
                 if prev.mv == mv {
                     break;
                 }
                 if prev.quiet {
-                    td.history_h[Self::hist_index(td.board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
+                    history_h[Self::hist_index(board.color(), prev.mv)] -= bonus / (explored_quiet - 1);
                 }
             }
         }
@@ -245,11 +302,15 @@ impl Engine {
         }
     }
 
-    fn eval_with_caches(&self, board: &mut Board, entry: Option<TEntry>, moves: &mut Option<Vec<Action>>) -> Eval {
+    // Writes the freshly-generated moves into `moves_buf` (a per-ply buffer
+    // owned by the caller) and sets `moves_ready` instead of returning a
+    // fresh ActionList by value - avoids a ~1.5KB struct copy on every node
+    // that isn't already covered by a cached eval.
+    fn eval_with_caches(&self, board: &mut Board, entry: Option<TEntry>, moves_buf: &mut ActionList, moves_ready: &mut bool) -> Eval {
         entry.map(|e| e.eval).unwrap_or_else(|| {
-            let mv = board.generate_moves();
-            let e = board.static_eval_fast(&mv);
-            *moves = Some(mv);
+            board.generate_moves_into(moves_buf);
+            let e = board.static_eval_fast(moves_buf);
+            *moves_ready = true;
             self.tt.put_eval(board.zobrist_hash, e);
             e
         })
@@ -288,8 +349,9 @@ impl Engine {
                 }
             }
         }
-        let mut moves: Option<Vec<Action>> = None;
-        let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
+        let idx = ply as usize;
+        let mut moves_ready = false;
+        let eval = self.eval_with_caches(&mut td.board, entry, &mut td.move_bufs[idx], &mut moves_ready);
 
         // stand pat: return immediately if the static eval is good enough, to avoid searching all non-quiet moves
         let mut alpha = alpha0;
@@ -303,19 +365,23 @@ impl Engine {
             return Some(eval);
         }
 
-        let mut moves = moves.unwrap_or_else(|| td.board.generate_moves());
+        if !moves_ready {
+            td.board.generate_moves_into(&mut td.move_bufs[idx]);
+        }
         let mut child_klr = Default::default();
         let mut best_move: Option<(Value, MoveInfo)> = None;
-        moves.retain(|mv| td.board.is_noisy(mv)); // qsearch only considers noisy moves
-        let moves = self.order_moves(moves, td, pv, killers);
-        for mvi in moves.iter() {
+        td.move_bufs[idx].retain(|mv| td.board.is_noisy(mv)); // qsearch only considers noisy moves
+        self.order_moves(&td.move_bufs[idx], &td.board, &td.history_h, &td.countermove, pv, killers, &mut td.order_bufs[idx]);
+        let n = td.order_bufs[idx].len();
+        for i in 0..n {
+            let mvi = td.order_bufs[idx][i];
             let mv = mvi.mv;
             let pending = td.play_pending(mv);
             let opt = self.qsearch(pending.td, ply + 1, max_ply, -beta, -alpha, &mut child_klr).map(|v| -v);
             drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
-                best_move = Some((value, *mvi));
+                best_move = Some((value, mvi));
             }
             alpha = alpha.max(value);
             if alpha >= beta {
@@ -394,8 +460,9 @@ impl Engine {
         }
 
         // static eval
-        let mut moves: Option<Vec<Action>> = None;
-        let eval = self.eval_with_caches(&mut td.board, entry, &mut moves);
+        let idx = ply as usize;
+        let mut moves_ready = false;
+        let eval = self.eval_with_caches(&mut td.board, entry, &mut td.move_bufs[idx], &mut moves_ready);
 
         // razoring
         if nt != NodeType::Pv && depth <= 6 && (eval as i32) < (alpha as i32 - 500 - 200 * depth as i32 * depth as i32) {
@@ -423,19 +490,23 @@ impl Engine {
         }
 
         let alpha0 = alpha; // alpha0 is the alpha before searching moves
-        let moves = moves.unwrap_or_else(|| td.board.generate_moves());
-        let moves = self.order_moves(moves, td, pv, killers);
+        if !moves_ready {
+            td.board.generate_moves_into(&mut td.move_bufs[idx]);
+        }
+        self.order_moves(&td.move_bufs[idx], &td.board, &td.history_h, &td.countermove, pv, killers, &mut td.order_bufs[idx]);
+        let n = td.order_bufs[idx].len();
         let mut best_move: Option<(Value, MoveInfo)> = None;
         let mut child_klr = Default::default();
         let mut explored_quiet = 0;
-        for (move_idx, mvi) in moves.iter().enumerate() {
+        for move_idx in 0..n {
+            let mvi = td.order_bufs[idx][move_idx];
             let mv = mvi.mv;
             let pending = td.play_pending(mv);
             let opt = self.pvs(pending.td, nt, ply, depth, alpha, beta, &mut child_klr, move_idx);
             drop(pending);
             let value = opt?;
             if best_move.is_none_or(|(v, _)| value > v) {
-                best_move = Some((value, *mvi));
+                best_move = Some((value, mvi));
             }
             alpha = alpha.max(value);
             if mvi.quiet {
@@ -448,7 +519,7 @@ impl Engine {
 
         // update history heuristic
         if let Some((_, mvi)) = best_move {
-            self.update_heuristics(td, depth, alpha, beta, killers, pv, mvi, &moves, explored_quiet);
+            self.update_heuristics(&td.board, &mut td.history_h, &mut td.countermove, depth, alpha, beta, killers, pv, mvi, &td.order_bufs[idx], explored_quiet);
         }
 
         // update transposition table
@@ -565,6 +636,9 @@ impl Engine {
                         countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
                         local_nodes: 0,
                         last_vote: None,
+                        // Sized to cover every representable ply (Depth is u8).
+                        move_bufs: (0..=Depth::MAX as usize).map(|_| ActionList::new()).collect(),
+                        order_bufs: (0..=Depth::MAX as usize).map(|_| MoveInfoList::new()).collect(),
                     };
                     th_engine.iterative_deepening(&mut td, max_depth, verbose);
                 });

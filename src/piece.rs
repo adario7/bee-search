@@ -68,11 +68,18 @@ impl Piece {
     }
 
     pub fn is_some(&self) -> bool {
-        self.num() != 0
+        // Equivalent to `self.num() != 0`: `num` is never zero for a real
+        // piece (see debug_assert in `make`), and every other bit is zero
+        // for an empty piece, so a raw whole-byte compare - no bitfield
+        // shift/mask needed - decides it. `occupied()`/`is_some()` are the
+        // single most frequently called check in movegen (every adjacent-
+        // tile test in every slide), so avoiding that extraction there adds
+        // up.
+        self.into_bytes() != [0]
     }
 
     pub fn is_none(&self) -> bool {
-        self.num() == 0
+        self.into_bytes() == [0]
     }
 }
 
