@@ -91,7 +91,7 @@ fn main() {
 
     // Phase 2: Adjacent Feature Difference Analysis
     let mut total_diffs: u64 = 0;
-    let total_elements: u64 = (n - 1) as u64 * 104;
+    let total_elements: u64 = (n - 1) as u64 * Board::TOTAL_FN as u64;
     for i in 0..n - 1 {
         let a = &accumulated[i];
         let b = &accumulated[i + 1];
@@ -103,7 +103,7 @@ fn main() {
 
     println!("\n=== ADJACENT FEATURE DIFFERENCE ANALYSIS ===");
     println!("Adjacent transitions evaluated: {}", n - 1);
-    println!("Average changed features per adjacent transition: {:.2} / 104 ({:.2}%)", avg_diff, pct_diff);
+    println!("Average changed features per adjacent transition: {:.2} / {} ({:.2}%)", avg_diff, Board::TOTAL_FN, pct_diff);
     println!("============================================\n");
 
     // Phase 3: MLP Inference Loop Benchmark

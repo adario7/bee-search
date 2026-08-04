@@ -3,6 +3,31 @@ use crate::{abstractions::TileSet, board::{Action, ActionList, Board}, piece::Co
 impl Board {
     pub const FN: usize = 4 + PCT_COUNT*6;
     pub const FN2: usize = Self::FN * 2;
+    pub const ADJ_SIZE: usize = 128;
+    pub const TOTAL_FN: usize = Self::FN2 + Self::ADJ_SIZE;
+
+    const fn adj_idx(mut c1: usize, mut c2: usize) -> Option<usize> {
+        if c1 > c2 {
+            let tmp = c1; c1 = c2; c2 = tmp;
+        }
+        if c1 == c2 && (c1 % 8 == 0 || c1 % 8 >= 5) {
+            return None;
+        }
+        let mut idx = 0;
+        let mut i = 0;
+        while i < 16 {
+            let mut j = i;
+            while j < 16 {
+                if !(i == j && (i % 8 == 0 || i % 8 >= 5)) {
+                    if i == c1 && j == c2 { return Some(idx); }
+                    idx += 1;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        None
+    }
 
     fn features_for(&self, color: Color, move_n: [u16; PCT_COUNT], immovable: &TileSet, out: &mut [i16]) {
         let mut liberties = [[0; 2]; 2];
@@ -60,21 +85,38 @@ impl Board {
         n_moves
     }
 
-    fn features_for_both(&mut self, my_n: [u16; PCT_COUNT]) -> [i16; Self::FN2] {
+    fn features_for_both(&mut self, my_n: [u16; PCT_COUNT]) -> [i16; Self::TOTAL_FN] {
         let immovable = self.find_cut_vertexes();
         let other_n = self.other_n_by_pct();
-        let mut out = [0; Self::FN2];
+        let mut out = [0; Self::TOTAL_FN];
         self.features_for(self.color(), my_n, &immovable, &mut out[0..Self::FN]);
-        self.features_for(self.color().other(), other_n, &immovable, &mut out[Self::FN..]);
+        self.features_for(self.color().other(), other_n, &immovable, &mut out[Self::FN..Self::FN2]);
+
+        let mut seen = [false; crate::tile::GRID_SIZE];
+        for &tile in self.occupied_tiles[0].iter().chain(self.occupied_tiles[1].iter()) {
+            let pc1 = self.tile(tile);
+            let cat1 = (pc1.color() != self.color()) as usize * PCT_COUNT + pc1.ptype().index();
+            seen[tile as usize] = true;
+            for &adj in adjacent(tile).iter() {
+                if self.occupied(adj) && !seen[adj as usize] {
+                    let pc2 = self.tile(adj);
+                    let cat2 = (pc2.color() != self.color()) as usize * PCT_COUNT + pc2.ptype().index();
+                    if let Some(idx) = Self::adj_idx(cat1, cat2) {
+                        out[Self::FN2 + idx] += 1;
+                    }
+                }
+            }
+        }
+
         out
     }
 
-    pub fn features_slow(&mut self) -> [i16; Self::FN2] {
+    pub fn features_slow(&mut self) -> [i16; Self::TOTAL_FN] {
         let my_n = self.generate_movements_by_pct();
         self.features_for_both(my_n)
     }
 
-    pub fn features_fast(&mut self, moves: &ActionList) -> [i16; Self::FN2] {
+    pub fn features_fast(&mut self, moves: &ActionList) -> [i16; Self::TOTAL_FN] {
         let mut my_n = [0; PCT_COUNT];
         for action in moves {
             if let Action::Move(from, _) = action {
@@ -84,3 +126,35 @@ impl Board {
         self.features_for_both(my_n)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adj_idx() {
+        let mut used = [false; Board::ADJ_SIZE];
+        let mut count = 0;
+        for i in 0..16 {
+            for j in i..16 {
+                if let Some(idx) = Board::adj_idx(i, j) {
+                    assert!(idx < Board::ADJ_SIZE, "Index {} out of bounds", idx);
+                    assert!(!used[idx], "Index {} used more than once", idx);
+                    used[idx] = true;
+                    count += 1;
+                    // Symmetry check
+                    assert_eq!(Board::adj_idx(j, i), Some(idx));
+                } else {
+                    // Diagonal entries for pieces with count 1
+                    assert_eq!(i, j);
+                    assert!(i % 8 == 0 || i % 8 >= 5, "Diagonal for type {} should not be excluded", i);
+                }
+            }
+        }
+        assert_eq!(count, Board::ADJ_SIZE, "Not all indices were used");
+        for (i, &u) in used.iter().enumerate() {
+            assert!(u, "Index {} was never used", i);
+        }
+    }
+}
+

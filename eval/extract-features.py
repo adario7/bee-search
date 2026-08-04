@@ -69,3 +69,10 @@ if __name__ == "__main__":
     with open(args.out_path, "w") as f:
         json.dump(results, f, indent=1)
     print(f"Saved features for {len(results)} positions to {args.out_path}")
+
+    if results:
+        total_zeros = sum(f == 0 for rec in results for f in rec["features"])
+        total_elems = sum(len(rec["features"]) for rec in results)
+        pct_zero = (total_zeros / total_elems) * 100.0 if total_elems > 0 else 0.0
+        print(f"Average percentage of zero entries: {pct_zero:.2f}%")
+
