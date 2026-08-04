@@ -89,7 +89,7 @@ fn main() {
         return;
     }
 
-    // Phase 2: Adjacent Feature Difference Analysis
+    // Phase 2: Feature Statistics & Difference Analysis
     let mut total_diffs: u64 = 0;
     let total_elements: u64 = (n - 1) as u64 * 104;
     for i in 0..n - 1 {
@@ -101,10 +101,19 @@ fn main() {
     let avg_diff = total_diffs as f64 / (n - 1) as f64;
     let pct_diff = (total_diffs as f64 / total_elements as f64) * 100.0;
 
-    println!("\n=== ADJACENT FEATURE DIFFERENCE ANALYSIS ===");
+    let mut total_zeros: u64 = 0;
+    for vec in &accumulated {
+        total_zeros += vec.iter().filter(|&&val| val == 0).count() as u64;
+    }
+    let avg_zeros = total_zeros as f64 / n as f64;
+    let pct_zeros = (total_zeros as f64 / (n as f64 * 104.0)) * 100.0;
+
+    println!("\n=== FEATURE STATISTICS & DIFFERENCE ANALYSIS ===");
+    println!("Total vectors evaluated: {}", n);
     println!("Adjacent transitions evaluated: {}", n - 1);
+    println!("Average zero input features (x == 0): {:.2} / 104 ({:.2}%)", avg_zeros, pct_zeros);
     println!("Average changed features per adjacent transition: {:.2} / 104 ({:.2}%)", avg_diff, pct_diff);
-    println!("============================================\n");
+    println!("=================================================\n");
 
     // Phase 3: MLP Inference Loop Benchmark
     println!("Running MLP inference benchmark for K = {} iterations...", args.iterations);
