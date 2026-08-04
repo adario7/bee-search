@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from os.path import split
 from arena import Engine
 import os
@@ -14,7 +18,7 @@ FEATURES_LEN = 12
 
 def _worker_eval(engine_path, positions, depth, timeout, worker_id, progress_bar):
     """Evaluate a list of positions using a single engine instance (one worker)."""
-    engine = Engine(engine_path, name=f"worker-{worker_id}")
+    engine = Engine(engine_path, log_name=f"worker-{worker_id}")
 
     engine.send("newgame Base")
     result = engine.receive(timeout=1)
@@ -60,7 +64,7 @@ def _worker_eval(engine_path, positions, depth, timeout, worker_id, progress_bar
             print(position)
             print(e)
             engine.terminate()
-            engine = Engine(engine_path, name=f"worker-{worker_id}")
+            engine = Engine(engine_path, log_name=f"worker-{worker_id}")
             engine.send("newgame Base")
             result = engine.receive(timeout=1)
             if len(result) == 0:

@@ -19,7 +19,7 @@ THINK_TOL = 0.1  # tolerance for timeout
 maxmoves = 200 # maximum number of moves per player per game
 
 class Engine:
-    def __init__(self, path, name=None):
+    def __init__(self, path, name=None, log_name=None):
         self.path = path
         self.proc = subprocess.Popen(
             [path],
@@ -33,10 +33,16 @@ class Engine:
         threading.Thread(target=self._reader, daemon=True).start()
 
         info = self.receive()
-        self.name = name or info[0].split('id ')[1] # the name is the id written at the start of the engine
-                                                    # it should be different for each engine 
+        if info and len(info) > 0 and 'id ' in info[0]:
+            self.name = info[0].split('id ')[1]
+        elif info and len(info) > 0:
+            self.name = info[0]
+        else:
+            self.name = os.path.basename(path)
+        self.id_name = self.name
+        self.log_name = log_name or name or self.name
         self._stderr_queue = queue.Queue()
-        self.stderr_log_file = open(f"logs/{self.name}_stderr.log","w")
+        self.stderr_log_file = open(f"logs/{self.log_name}_stderr.log","w")
         threading.Thread(target=self._read_stderr, daemon=True).start()
 
         # nokamute format
