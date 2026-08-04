@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use crate::{board::Board, eval::Eval};
 
 /* dataset:
@@ -12,7 +14,34 @@ MLP on test set (using best-epoch weights) - evaluation output:
   R2:   0.8179
 */
 
+// state & helper functions for mlp-bench
+static ACCUMULATE_ENABLED: AtomicBool = AtomicBool::new(false);
+static ACCUMULATED_X: Mutex<Vec<Vec<i16>>> = Mutex::new(Vec::new());
+pub fn set_accumulation(enabled: bool) {
+    ACCUMULATE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+pub fn clear_accumulated_features() {
+    if let Ok(mut guard) = ACCUMULATED_X.lock() {
+        guard.clear();
+    }
+}
+pub fn take_accumulated_features() -> Vec<Vec<i16>> {
+    ACCUMULATE_ENABLED.store(false, Ordering::Relaxed);
+    if let Ok(mut guard) = ACCUMULATED_X.lock() {
+        std::mem::take(&mut *guard)
+    } else {
+        Vec::new()
+    }
+}
+
+
 pub fn mlp_inference(x: &[i16]) -> Eval {
+    if ACCUMULATE_ENABLED.load(Ordering::Relaxed) {
+        if let Ok(mut guard) = ACCUMULATED_X.lock() {
+            guard.push(x.to_vec());
+        }
+    }
+
     const SH: usize = A_B3.len();
     let mut cat = [0.0f32; SH*2];
     shared_inference_a(&x[..Board::FN], &mut cat[..SH]);
