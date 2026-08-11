@@ -119,8 +119,8 @@ impl Board {
     pub fn features_fast(&mut self, moves: &ActionList) -> [i16; Self::TOTAL_FN] {
         let mut my_n = [0; PCT_COUNT];
         for action in moves {
-            if let Action::Move(from, _) = action {
-                my_n[self.tile(*from).ptype().index()] += 1;
+            if action.is_move() {
+                my_n[self.tile(action.move_from()).ptype().index()] += 1;
             }
         }
         self.features_for_both(my_n)

@@ -22,6 +22,26 @@ impl PieceType {
         self as usize
     }
 
+    /// Inverse of `index()`. A dense match rather than a `transmute`: this
+    /// enum carries no `#[repr]`, so transmuting an integer into it would be
+    /// relying on an unspecified layout. LLVM folds this to the identity.
+    #[inline]
+    pub fn from_index(i: u8) -> Self {
+        match i {
+            0 => PieceType::Queen,
+            1 => PieceType::Grasshopper,
+            2 => PieceType::Spider,
+            3 => PieceType::Ant,
+            4 => PieceType::Beetle,
+            5 => PieceType::Mosquito,
+            6 => PieceType::Ladybug,
+            _ => {
+                debug_assert_eq!(i, 7, "piece type index out of range");
+                PieceType::Pillbug
+            }
+        }
+    }
+
     pub fn iter_all() -> impl Iterator<Item = Self> {
         [
             PieceType::Queen,

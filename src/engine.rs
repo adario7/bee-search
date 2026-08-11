@@ -1,4 +1,4 @@
-use crate::{board::{Action, Board, GameResult, ActionList}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
+use crate::{board::{Action, ActionKind, Board, GameResult, ActionList}, eval::{Eval, Value}, piece::Color, piece_type::PCT_COUNT, tile::GRID_SIZE, tt::{TEntry, TTFlag, TTable}};
 use std::{cmp::Ordering, sync::{atomic::{self, AtomicBool, AtomicU64, AtomicU8}, Arc}, time::{Duration, Instant}, u64, usize};
 use crossbeam::thread;
 
@@ -138,28 +138,39 @@ impl Engine {
         }
     }
 
+    // Index scheme: each destination tile owns a stride of (GRID_SIZE + PCT_COUNT).
+    // Within that stride, slots [0, GRID_SIZE) are keyed by a move's origin tile,
+    // and the reserved tail [GRID_SIZE, GRID_SIZE + PCT_COUNT) is keyed by the
+    // placed piece type - so moves and placements can never collide.
+    //
+    // NOTE: `Action::Place`'s fields are (Tile, PieceType) in that order. These
+    // arms used to bind them as `(pct, to)`, silently swapping the two, which
+    // computed `pct * stride + GRID_SIZE + tile` instead. That stayed in bounds
+    // (max 9271) but collided heavily with the Move index space - e.g.
+    // Place(Queen, tile 100) and Move(to 1, from 92) both mapped to 1124 -
+    // quietly corrupting the history heuristic and the root move-vote table.
     fn vote_index(mv: Action) -> usize {
-        match mv {
-            Action::Place(pct, to) => to as usize * (GRID_SIZE + PCT_COUNT) + GRID_SIZE + pct as usize,
-            Action::Move(from, to) => to as usize * (GRID_SIZE + PCT_COUNT) + from as usize,
-            Action::Pass => (GRID_SIZE + PCT_COUNT) * GRID_SIZE
+        match mv.kind() {
+            ActionKind::Place(to, pct) => to as usize * (GRID_SIZE + PCT_COUNT) + GRID_SIZE + pct as usize,
+            ActionKind::Move(from, to) => to as usize * (GRID_SIZE + PCT_COUNT) + from as usize,
+            ActionKind::Pass => (GRID_SIZE + PCT_COUNT) * GRID_SIZE
         }
     }
 
     fn hist_index(c: Color, mv: Action) -> usize {
         let ci = c as usize * (GRID_SIZE + PCT_COUNT) * GRID_SIZE;
-        match mv {
-            Action::Place(pct, to)
+        match mv.kind() {
+            ActionKind::Place(to, pct)
                 => ci + to as usize * (GRID_SIZE + PCT_COUNT) + GRID_SIZE + pct as usize,
-            Action::Move(from, to)
+            ActionKind::Move(from, to)
                 => ci + to as usize * (GRID_SIZE + PCT_COUNT) + from as usize,
-            Action::Pass
+            ActionKind::Pass
                 => 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE
         }
     }
 
     fn last_move_index(b: &Board) -> usize {
-        let last_move = b.turn_history.last().unwrap_or(&Action::Pass);
+        let last_move = b.turn_history.last().unwrap_or(&Action::PASS);
         Self::hist_index(b.color().other(), *last_move)
     }
 
@@ -196,7 +207,7 @@ impl Engine {
     // this rather than through one opaque `&mut ThreadData` parameter.
     fn order_moves(&self, moves: &[Action], board: &Board, history_h: &[i64], countermove: &[Action], pv: Option<Action>, killers: &KillerT, out: &mut MoveInfoList) {
         out.clear();
-        let pv = pv.unwrap_or(Action::Pass);
+        let pv = pv.unwrap_or(Action::PASS);
         let countermove_mv = countermove[Self::last_move_index(board)];
         for &mv in moves {
             out.push(MoveInfo {
@@ -480,7 +491,7 @@ impl Engine {
             if eval >= beta {
                 let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
-                let pending = td.play_pending(Action::Pass);
+                let pending = td.play_pending(Action::PASS);
                 let value = -self.minimax(pending.td, NodeType::All, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
                 drop(pending);
                 if value >= beta {
@@ -633,7 +644,7 @@ impl Engine {
                         completed_depth: th_compl,
                         deadline,
                         history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
-                        countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                        countermove: vec![Action::PASS; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
                         local_nodes: 0,
                         last_vote: None,
                         // Sized to cover every representable ply (Depth is u8).
@@ -663,7 +674,7 @@ impl Engine {
             }
             eprintln!();
         }
-        let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::Pass);
+        let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::PASS);
         (value, best_move)
     }
 
@@ -681,8 +692,8 @@ impl Engine {
             eprint!("pv: ");
             let mut bb = board.clone();
             for _ in 0..16 {
-                let mv = self.tt.get(bb.zobrist_hash).map(|e| e.pv).unwrap_or(Action::Pass);
-                if mv == Action::Pass { break; }
+                let mv = self.tt.get(bb.zobrist_hash).map(|e| e.pv).unwrap_or(Action::PASS);
+                if mv == Action::PASS { break; }
                 eprint!("{};", bb.action_to_string(mv));
                 bb.do_action(mv);
             }

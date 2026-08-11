@@ -2,7 +2,7 @@ use crate::uhp::{UhpError, UhpResult};
 use crate::tile::{Direction, Tile, GRID_SIZE, TILE_ZERO};
 use crate::piece_type::{Pct, PieceType};
 use crate::piece::{Color, Piece};
-use crate::board::{Action, Board, GameResult};
+use crate::board::{Action, ActionKind, Board, GameResult};
 
 impl PieceType {
     fn is_numbered(self) -> bool {
@@ -99,10 +99,10 @@ impl Board {
 
     pub fn action_to_string(&self, m: Action) -> String {
         let mut out = String::new();
-        match m {
-            Action::Move(start, _) => self.piece_name(self.tile(start), &mut out),
-            Action::Place(_, pct) => self.new_piece_name(pct, &mut out),
-            Action::Pass => return "pass".to_string(),
+        match m.kind() {
+            ActionKind::Move(start, _) => self.piece_name(self.tile(start), &mut out),
+            ActionKind::Place(_, pct) => self.new_piece_name(pct, &mut out),
+            ActionKind::Pass => return "pass".to_string(),
         }
 
         if self.turn_num == 0 {
@@ -110,10 +110,10 @@ impl Board {
         }
         out.push(' ');
 
-        match m {
-            Action::Move(start, end) => self.tile_name(start, end, &mut out),
-            Action::Place(tile, _) => self.tile_name((GRID_SIZE + 1) as Tile, tile, &mut out), //TODO obrobrioso
-            Action::Pass => unreachable!(),
+        match m.kind() {
+            ActionKind::Move(start, end) => self.tile_name(start, end, &mut out),
+            ActionKind::Place(tile, _) => self.tile_name((GRID_SIZE + 1) as Tile, tile, &mut out), //TODO obrobrioso
+            ActionKind::Pass => unreachable!(),
         }
         out
     }
@@ -229,7 +229,7 @@ impl Board {
     pub fn parse_action(&self, move_string: &str) -> UhpResult<Action> {
         let err = || UhpError::InvalidMove(move_string.to_owned());
         if move_string == "pass" {
-            return Ok(Action::Pass);
+            return Ok(Action::PASS);
         }
         let tokens = move_string.split(' ').collect::<Vec<_>>();
         let (piece, _) = self.parse_piece_direction(tokens[0]).ok_or_else(err)?;
@@ -238,7 +238,7 @@ impl Board {
             if tokens.len() != 1 {
                 return Err(err());
             }
-            return Ok(Action::Place(TILE_ZERO, piece.ptype()));
+            return Ok(Action::place(TILE_ZERO, piece.ptype()));
         }
         // other turns have two operands
         if tokens.len() != 2 {
@@ -247,8 +247,8 @@ impl Board {
         let start = self.find_piece(piece);
         let end = self.parse_tile(tokens[1]).ok_or_else(err)?;
         Ok(match start {
-            Some(start) => Action::Move(start, end),
-            None => Action::Place(end, piece.ptype()),
+            Some(start) => Action::mv(start, end),
+            None => Action::place(end, piece.ptype()),
         })
     }
 

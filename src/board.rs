@@ -44,6 +44,29 @@ impl ActionList {
         self.moves[self.len] = std::mem::MaybeUninit::new(action);
         self.len += 1;
     }
+    /// Append one `Place` per entry of `bugs`, all on the same tile.
+    ///
+    /// Exists because `push` was ~33% of perft runtime: each call separately
+    /// re-read `len`, bounds-checked, stored one element and wrote `len` back,
+    /// serialising a read-modify-write per move. Placements dominate (~93% of
+    /// all pushes) and every placement on a given tile shares the same encoded
+    /// prefix, differing only in the low 3 piece-type bits - so they can be
+    /// written as one fixed-length slice loop with a single `len` update,
+    /// which LLVM can vectorize.
+    #[inline]
+    pub fn push_places(&mut self, tile: Tile, bugs: &[PieceType]) {
+        let n = bugs.len();
+        debug_assert!(self.len + n <= 256);
+        debug_assert!((tile as usize) < GRID_SIZE);
+        let base = (ACT_TAG_PLACE << ACT_TAG_SHIFT) | ((tile as u32 & ACT_TILE_MASK) << 3);
+        let start = self.len;
+        let dst = &mut self.moves[start..start + n];
+        for (slot, &bug) in dst.iter_mut().zip(bugs) {
+            *slot = std::mem::MaybeUninit::new(Action(base | (bug as u32 & ACT_PCT_MASK)));
+        }
+        self.len = start + n;
+    }
+
     pub fn swap_remove(&mut self, index: usize) -> Action {
         debug_assert!(index < self.len);
         // SAFETY: index and len-1 are both < self.len, hence initialized.
@@ -105,12 +128,110 @@ impl IntoIterator for ActionList {
 static ZOBRIST_TABLE: OnceLock<[u64; GRID_SIZE * 2]> = OnceLock::new();
 static PLAYER_HASH: u64 = 0xc851ba955a512175;
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub enum Action {
+// A move, packed into 4 bytes (was a 6-byte enum).
+//
+// Bit layout:
+//   bits 21..20  tag: 0 = Place, 1 = Move, 2 = Pass
+//   Place        bits 12..3 = tile (10 bits), bits 2..0 = piece type (3 bits)
+//   Move         bits 19..10 = from (10 bits), bits 9..0 = to (10 bits)
+//   Pass         payload zero
+//
+// A Tile needs only 10 bits (GRID_SIZE == 1024) and a PieceType only 3, so
+// everything fits with room to spare.
+//
+// ORDERING IS LOAD-BEARING: the tag sits in the high bits and each payload
+// packs its fields most-significant-first, so the derived integer `Ord`
+// reproduces *exactly* the ordering the old `#[derive(Ord)]` enum had - all
+// Place < all Move < Pass, and lexicographic by field within a variant.
+// `speed-bench` sorts move lists and then samples with a seeded RNG, so a
+// different order would silently change that benchmark's games.
+//
+// Why 4 bytes rather than 6: on aarch64 (the deployment target) address
+// computation can only scale by powers of two, so a 6-byte element forced an
+// extra `add x,x,x,lsl #1` + `lsl #1` pair at every indexed access - 59 such
+// sequences in the library. At 4 bytes it folds into `[base, idx, lsl #2]`.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Action(u32);
+
+const ACT_TAG_SHIFT: u32 = 20;
+const ACT_TAG_PLACE: u32 = 0;
+const ACT_TAG_MOVE: u32 = 1;
+const ACT_TAG_PASS: u32 = 2;
+const ACT_TILE_MASK: u32 = 0x3FF; // 10 bits: GRID_SIZE == 1024
+const ACT_PCT_MASK: u32 = 0x7; // 3 bits: 8 piece types
+
+/// Unpacked view of an [`Action`], for matching. `Action::kind()` decodes
+/// into this; it is a temporary that optimizes away in hot paths.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ActionKind {
     Place(Tile, PieceType),
     Move(Tile, Tile),
-    #[default]
     Pass,
+}
+
+impl Action {
+    pub const PASS: Action = Action(ACT_TAG_PASS << ACT_TAG_SHIFT);
+
+    #[inline]
+    pub fn place(tile: Tile, pct: PieceType) -> Action {
+        debug_assert!((tile as usize) < GRID_SIZE);
+        Action((ACT_TAG_PLACE << ACT_TAG_SHIFT)
+            | ((tile as u32 & ACT_TILE_MASK) << 3)
+            | (pct as u32 & ACT_PCT_MASK))
+    }
+
+    #[inline]
+    pub fn mv(from: Tile, to: Tile) -> Action {
+        debug_assert!((from as usize) < GRID_SIZE && (to as usize) < GRID_SIZE);
+        Action((ACT_TAG_MOVE << ACT_TAG_SHIFT)
+            | ((from as u32 & ACT_TILE_MASK) << 10)
+            | (to as u32 & ACT_TILE_MASK))
+    }
+
+    #[inline]
+    fn tag(self) -> u32 { self.0 >> ACT_TAG_SHIFT }
+
+    #[inline]
+    pub fn is_pass(self) -> bool { self.tag() == ACT_TAG_PASS }
+    #[inline]
+    pub fn is_move(self) -> bool { self.tag() == ACT_TAG_MOVE }
+    #[inline]
+    pub fn is_place(self) -> bool { self.tag() == ACT_TAG_PLACE }
+
+    /// Destination of a Move. Only meaningful when `is_move()`.
+    #[inline]
+    pub fn move_to(self) -> Tile { (self.0 & ACT_TILE_MASK) as Tile }
+    /// Origin of a Move. Only meaningful when `is_move()`.
+    #[inline]
+    pub fn move_from(self) -> Tile { ((self.0 >> 10) & ACT_TILE_MASK) as Tile }
+    /// Target tile of a Place. Only meaningful when `is_place()`.
+    #[inline]
+    pub fn place_tile(self) -> Tile { ((self.0 >> 3) & ACT_TILE_MASK) as Tile }
+    /// Piece type of a Place. Only meaningful when `is_place()`.
+    #[inline]
+    pub fn place_pct(self) -> PieceType { PieceType::from_index((self.0 & ACT_PCT_MASK) as u8) }
+
+    #[inline]
+    pub fn kind(self) -> ActionKind {
+        match self.tag() {
+            ACT_TAG_PLACE => ActionKind::Place(self.place_tile(), self.place_pct()),
+            ACT_TAG_MOVE => ActionKind::Move(self.move_from(), self.move_to()),
+            _ => ActionKind::Pass,
+        }
+    }
+}
+
+impl Default for Action {
+    // Must stay Pass: `KillerT` and `countermove` are built with
+    // `Default::default()` and rely on the empty slot meaning "no move".
+    #[inline]
+    fn default() -> Self { Action::PASS }
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.kind(), f)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -328,14 +449,14 @@ impl Board {
 
     /// assumes the action is legal
     pub fn do_action(&mut self, action: Action) {
-        match action {
-            Action::Place(tile, piece_type) => {
+        match action.kind() {
+            ActionKind::Place(tile, piece_type) => {
                 let piece = self.make_next_piece(piece_type);
                 self.add_piece(tile, piece);
                 self.placeable[self.color().index()][piece_type as usize] -= 1;
             }
-            Action::Move(from, to) => self.do_move(from, to),
-            Action::Pass => {}
+            ActionKind::Move(from, to) => self.do_move(from, to),
+            ActionKind::Pass => {}
         }
         self.turn_num += 1;
         self.turn_history.push(action);
@@ -350,14 +471,14 @@ impl Board {
 
         self.zobrist_hash ^= PLAYER_HASH;
         self.zobrist_history.pop();
-        match action {
-            Action::Place(tile, piece_type) => {
+        match action.kind() {
+            ActionKind::Place(tile, piece_type) => {
                 debug_assert!(self.world[tile as usize].ptype() == piece_type);
                 self.remove_piece(tile);
                 self.placeable[self.color().index()][piece_type as usize] += 1;
             }
-            Action::Move(from, to) => self.do_move(to, from),
-            Action::Pass => {}
+            ActionKind::Move(from, to) => self.do_move(to, from),
+            ActionKind::Pass => {}
         }
     }
 
@@ -394,14 +515,17 @@ impl Board {
 
     // a move is noisy if attacks the opponent's queen
     pub fn is_noisy(self: &Board, action: &Action) -> bool {
-        if let Action::Move(_, to) = action {
+        // Hot: called once per move during ordering. Uses the direct
+        // accessors rather than `kind()` so no ActionKind is materialized.
+        if action.is_move() {
+            let to = action.move_to();
             let queen = self.queens[self.color().other() as usize];
             if let Some(target) = queen {
-                if *to == target {
+                if to == target {
                     return true;
                 }
                 for d in Direction::all() {
-                    if *to + *d == target {
+                    if to + *d == target {
                         return true;
                     }
                 }
@@ -432,11 +556,11 @@ mod test {
         let mut board = Board::new();
         let a = TILE_ZERO;
         let b = TILE_ZERO + 1;
-        board.do_action(Action::Place(a, PieceType::Queen));
+        board.do_action(Action::place(a, PieceType::Queen));
         assert_eq!(board.placeable[Color::White.index()][PieceType::Queen as usize], 0);
-        board.do_action(Action::Place(b, PieceType::Queen));
+        board.do_action(Action::place(b, PieceType::Queen));
         assert_eq!(board.placeable[Color::Black.index()][PieceType::Queen as usize], 0);
-        board.do_action(Action::Move(a, b));
+        board.do_action(Action::mv(a, b));
         assert_eq!(board.world[a as usize], Piece::empty());
         assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
         assert_eq!(board.underworld_at(b)[0], Piece::make(Color::Black, PieceType::Queen, 1));
@@ -453,22 +577,22 @@ mod test {
         let mut board = Board::new();
         let a = TILE_ZERO;
         let b = TILE_ZERO + Direction::E + Direction::E + Direction::E;
-        board.do_action(Action::Place(a, PieceType::Queen));
-        board.do_action(Action::Place(b, PieceType::Queen));
+        board.do_action(Action::place(a, PieceType::Queen));
+        board.do_action(Action::place(b, PieceType::Queen));
         assert_eq!(board.game_result(), GameResult::InProgress);
         for &d in Direction::all() {
             let pct = Pct::iter_all().filter(|&p| board.placeable[0][p as usize] > 0).next().unwrap();
-            board.do_action(Action::Place(b + d, pct));
+            board.do_action(Action::place(b + d, pct));
             println!("{} {:?} {:?}", board.turn_num, d, pct);
             if board.turn_num == 1+6*2 {
                 assert_eq!(board.game_result(), GameResult::Winner(Color::White));
             } else {
                 assert_eq!(board.game_result(), GameResult::InProgress);
             }
-            board.do_action(Action::Place(a + d, pct));
+            board.do_action(Action::place(a + d, pct));
         }
         assert_eq!(board.game_result(), GameResult::Draw);
-        board.do_action(Action::Move(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
+        board.do_action(Action::mv(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
         assert_eq!(board.game_result(), GameResult::Winner(Color::Black));
     }
 
@@ -535,8 +659,8 @@ mod test {
                     b1.do_action(moves[mov]);
                     b2.do_action(moves[mov]);
                 }else {
-                    b1.do_action(Action::Pass);
-                    b2.do_action(Action::Pass);
+                    b1.do_action(Action::PASS);
+                    b2.do_action(Action::PASS);
                 }
                 assert!(compare_boards(&mut b1, &mut b2));
                 assert!(b1.zobrist_hash == b2.zobrist_hash);
@@ -566,14 +690,14 @@ mod test {
                     let mov1 = rng.random_range(0..moves1.len());
                     b1.do_action(moves1[mov1]);
                 }else {
-                    b1.do_action(Action::Pass);
+                    b1.do_action(Action::PASS);
                 }
                 let moves2 = b2.generate_moves();
                 if moves2.len() > 0 {
                     let mov2 = rng.random_range(0..moves2.len());
                     b2.do_action(moves2[mov2]);
                 }else {
-                    b2.do_action(Action::Pass);
+                    b2.do_action(Action::PASS);
                 }
                 assert_eq!(compare_boards(&mut b1, &mut b2), b1.zobrist_hash == b2.zobrist_hash);
             }
@@ -585,5 +709,61 @@ mod test {
                 b2.undo_action();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod action_repr_test {
+    use super::*;
+    #[test]
+    fn action_is_four_bytes_and_roundtrips() {
+        assert_eq!(std::mem::size_of::<Action>(), 4, "Action must be 4 bytes");
+        assert_eq!(std::mem::size_of::<ActionList>(), 4 * 256 + 8);
+        // Default must remain Pass.
+        assert_eq!(Action::default(), Action::PASS);
+        assert!(Action::PASS.is_pass());
+        // Exhaustive round-trip over the whole encodable space.
+        for t in 0..GRID_SIZE as Tile {
+            for p in 0..8u8 {
+                let pct = PieceType::from_index(p);
+                let a = Action::place(t, pct);
+                assert!(a.is_place());
+                assert_eq!(a.kind(), ActionKind::Place(t, pct));
+            }
+            for &f in &[0u16, 1, 511, 1022, 1023] {
+                let a = Action::mv(f, t);
+                assert!(a.is_move());
+                assert_eq!(a.kind(), ActionKind::Move(f, t));
+                assert_eq!(a.move_from(), f);
+                assert_eq!(a.move_to(), t);
+            }
+        }
+    }
+
+    #[test]
+    fn ordering_matches_the_old_enum() {
+        // Old derived Ord: all Place < all Move < Pass; within a variant,
+        // lexicographic by field. Rebuild that order independently and
+        // compare against the packed type's Ord.
+        let mut packed = Vec::new();
+        let mut reference = Vec::new();
+        for t in (0..GRID_SIZE as Tile).step_by(37) {
+            for p in 0..8u8 {
+                packed.push(Action::place(t, PieceType::from_index(p)));
+                reference.push((0u8, t, p as u16));
+            }
+            for f in (0..GRID_SIZE as Tile).step_by(101) {
+                packed.push(Action::mv(f, t));
+                reference.push((1u8, f, t));
+            }
+        }
+        packed.push(Action::PASS);
+        reference.push((2u8, 0, 0));
+
+        let mut by_packed: Vec<usize> = (0..packed.len()).collect();
+        by_packed.sort_by_key(|&i| packed[i]);
+        let mut by_reference: Vec<usize> = (0..reference.len()).collect();
+        by_reference.sort_by_key(|&i| reference[i]);
+        assert_eq!(by_packed, by_reference, "packed Ord diverges from the old enum ordering");
     }
 }

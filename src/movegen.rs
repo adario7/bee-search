@@ -7,10 +7,20 @@ impl Board {
     fn generate_placements(&self, turns: &mut ActionList) {
         let mut no_placement = TileSet::new();
         for &enemy in self.occupied_tiles[self.color().other().index()].iter() {
-            for adj in adjacent(enemy) {
-                no_placement.set(adj);
-            }
+            no_placement.set_adjacent(enemy);
         }
+
+        // The set of placeable piece types is the same for EVERY hex, so
+        // compute it once instead of re-deriving it (and re-checking
+        // `queen_required()`) per hex per type. Order is preserved exactly:
+        // still `Pct::iter_all()` order, so the generated move sequence is
+        // byte-identical and both perft counts and search behaviour are
+        // unchanged.
+        let (avail, n_avail) = self.available_placements();
+        if n_avail == 0 {
+            return;
+        }
+        let avail = &avail[..n_avail];
 
         for &friend in self.occupied_tiles[self.color() as usize].iter() {
             for hex in adjacent(friend) {
@@ -21,29 +31,46 @@ impl Board {
                 if self.occupied(hex) {
                     continue;
                 }
-                let remaining = self.placeable[self.color().index()];
-                for bug in Pct::iter_all() {
-                    let num_left = remaining[bug as usize];
-                    if self.queen_required() && bug != Pct::Queen {
-                        continue;
-                    }
-                    if num_left > 0 {
-                        turns.push(Action::Place(hex, bug));
-                    }
-                }
+                turns.push_places(hex, avail);
             }
         }
+    }
+
+    /// Piece types the side to move may currently place, in `Pct::iter_all()`
+    /// order, plus how many are valid. Loop-invariant across hexes, so
+    /// callers hoist it out of the hex scan.
+    fn available_placements(&self) -> ([Pct; PCT_COUNT], usize) {
+        let remaining = &self.placeable[self.color().index()];
+        let queen_req = self.queen_required();
+        let mut out = [Pct::Queen; PCT_COUNT];
+        let mut n = 0;
+        for bug in Pct::iter_all() {
+            // When the queen is due, it is the only legal placement.
+            if queen_req && bug != Pct::Queen {
+                continue;
+            }
+            if remaining[bug as usize] > 0 {
+                out[n] = bug;
+                n += 1;
+            }
+        }
+        (out, n)
     }
 
     fn generate_placements_n(self: &Board) -> usize {
         let mut no_placement = TileSet::new();
         for &enemy in self.occupied_tiles[self.color().other().index()].iter() {
-            for adj in adjacent(enemy) {
-                no_placement.set(adj);
-            }
+            no_placement.set_adjacent(enemy);
         }
 
-        let mut num = 0;
+        // Every placeable hex contributes exactly `n_avail` placements, so
+        // this is just (number of placeable hexes) * n_avail - no inner loop.
+        let (_, n_avail) = self.available_placements();
+        if n_avail == 0 {
+            return 0;
+        }
+
+        let mut hexes = 0;
         for &friend in self.occupied_tiles[self.color() as usize].iter() {
             for hex in adjacent(friend) {
                 if no_placement.get(hex) {
@@ -53,19 +80,10 @@ impl Board {
                 if self.occupied(hex) {
                     continue;
                 }
-                let remaining = self.placeable[self.color().index()];
-                for bug in Pct::iter_all() {
-                    let num_left = remaining[bug as usize];
-                    if self.queen_required() && bug != Pct::Queen {
-                        continue;
-                    }
-                    if num_left > 0 {
-                        num += 1;
-                    }
-                }
+                hexes += 1;
             }
         }
-        num
+        hexes * n_avail
     }
 
     // Linear algorithm to find all cut vertexes.
@@ -121,8 +139,26 @@ impl Board {
             }
         }
 
-        let start = *self.occupied_tiles[self.color().index()].first().unwrap_or_else(
-            || self.occupied_tiles[self.color().index()].first().unwrap_or(&TILE_ZERO));
+        // Root the DFS at ANY occupied tile, independent of whose turn it is.
+        //
+        // The hive is always connected (One Hive rule), and for a connected
+        // graph the articulation-point set is the same whichever vertex you
+        // root at (the root's own status is decided by the `children > 1`
+        // rule above) - so colour must not influence the result. That also
+        // makes `find_cut_vertexes`'s zobrist-only cache key sound, since
+        // `features_for_both` deliberately probes one position under both
+        // colours and shares a single cache entry.
+        //
+        // This used to try the mover's tiles and then "fall back" to a
+        // re-read of the very same list, so when the mover had no uncovered
+        // pieces (legal - all of them buried under enemy beetles/mosquito)
+        // it rooted at TILE_ZERO, which may be unoccupied; the traversal
+        // then bridged genuinely disconnected neighbours through that empty
+        // tile and produced a wrong pinned-piece set.
+        let start = match self.occupied_tiles[0].first().or_else(|| self.occupied_tiles[1].first()) {
+            Some(&t) => t,
+            None => return state.immovable, // empty hive: nothing is pinned
+        };
         dfs(&mut state, start, start);
         state.immovable
     }
@@ -204,16 +240,30 @@ impl Board {
     pub(crate) fn slidable_adjacent<'a>(
         &self, neighbors: &'a mut [Tile; 6], origin: Tile, hex: Tile,
     ) -> impl Iterator<Item = Tile> + 'a {
-        *neighbors = adjacent(hex);
-        // Each bit is whether neighbor is occupied.
-        let mut occupied = 0;
-        for neighbor in neighbors.iter().rev() {
-            occupied <<= 1;
-            // Since the origin bug is moving, we can't crawl around it.
-            if self.occupied(*neighbor) && *neighbor != origin {
-                occupied |= 1;
-            }
-        }
+        let n = adjacent(hex);
+        *neighbors = n;
+        // Each bit is whether neighbor i is occupied.
+        //
+        // Written as six INDEPENDENT terms OR'd together rather than the
+        // obvious `for .. { occupied = (occupied << 1) | bit }` loop. That
+        // loop carries a dependency through `occupied`, so the six shifts
+        // and ORs must execute strictly in sequence (~2 cycles each) even
+        // though the six occupancy loads themselves are independent. As a
+        // flat OR-tree the loads all issue in parallel and the ORs collapse
+        // in log2(6)=3 dependent steps instead of 6.
+        //
+        // (Reading through the `neighbors` out-param inside the loop also
+        // forced a store->load round trip; using the local `n` avoids it.)
+        //
+        // Bit order is unchanged: the old loop walked neighbours in reverse
+        // shifting left each time, which leaves bit i == occupied(n[i]).
+        let occ = |t: Tile| (self.occupied(t) && t != origin) as i32;
+        let mut occupied = occ(n[0])
+            | (occ(n[1]) << 1)
+            | (occ(n[2]) << 2)
+            | (occ(n[3]) << 3)
+            | (occ(n[4]) << 4)
+            | (occ(n[5]) << 5);
         // Wrap around in each direction
         occupied |= (occupied << 6) | (occupied << 12);
         let slidable = (!occupied & ((occupied << 1) ^ (occupied >> 1))) >> 6;
@@ -267,7 +317,7 @@ impl Board {
     fn generate_stack_walking(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent_beetle(&mut buf, hex, hex) {
-            turns.push(Action::Move(hex, adj));
+            turns.push(Action::mv(hex, adj));
         }
     }
 
@@ -291,7 +341,7 @@ impl Board {
                 }
             }
             if dist > 1 {
-                turns.push(Action::Move(hex, jump));
+                turns.push(Action::mv(hex, jump));
             }
         }
     }
@@ -320,7 +370,7 @@ impl Board {
     fn generate_walk1(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent(&mut buf, hex, hex) {
-            turns.push(Action::Move(hex, adj));
+            turns.push(Action::mv(hex, adj));
         }
     }
 
@@ -336,7 +386,7 @@ impl Board {
                 if s2 != orig {
                     for s3 in self.slidable_adjacent(&mut buf3, orig, s2) {
                         if s3 != s1 && !visited.get(s3) {
-                            turns.push(Action::Move(orig, s3));
+                            turns.push(Action::mv(orig, s3));
                             visited.set(s3);
                         }
                     }
@@ -387,7 +437,7 @@ impl Board {
             }
             visited.set(node);
             if node != orig {
-                turns.push(Action::Move(orig, node));
+                turns.push(Action::mv(orig, node));
             }
             for adj in self.slidable_adjacent(&mut buf, orig, node) {
                 if !visited.get(adj) {
@@ -467,7 +517,7 @@ impl Board {
                         for s3 in self.slidable_adjacent_beetle(&mut buf3, hex, s2) {
                             if !self.occupied(s3) && !step3.get(s3) {
                                 step3.set(s3);
-                                turns.push(Action::Move(hex, s3));
+                                turns.push(Action::mv(hex, s3));
                             }
                         }
                     }
@@ -528,7 +578,7 @@ impl Board {
         }
         for &start in starts[..num_starts].iter() {
             for &end in ends[..num_ends].iter() {
-                turns.push(Action::Move(start, end));
+                turns.push(Action::mv(start, end));
                 throw_starts.set(start);
                 throw_ends.set(end);
             }
@@ -595,7 +645,8 @@ impl Board {
         // Remove duplicates.
         let mut dests = TileSet::new();
         while i < turns.len() {
-            if let Action::Move(_, dest) = turns[i] {
+            if turns[i].is_move() {
+                let dest = turns[i].move_to();
                 if dests.get(dest) {
                     turns.swap_remove(i);
                 } else {
@@ -647,12 +698,12 @@ impl Board {
 
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
-            Some(Action::Move(_, dest)) => Some(dest),
+            Some(a) if a.is_move() => Some(a.move_to()),
             _ => None,
         };
         if let Some(moved) = stunned {
             // Can't move pieces that were moved on the opponent's turn.
-            immovable.set(*moved);
+            immovable.set(moved);
         }
 
         // Pillbug throws need to be deduped against organic movements, so generate them first.
@@ -663,7 +714,7 @@ impl Board {
         for &hex in self.occupied_tiles[self.color() as usize].iter() {
             marker = turns.len();
             let node = self.tile(hex);
-            if stunned == Some(&hex) {
+            if stunned == Some(hex) {
                 continue;
             }
             if node.ptype() == Pct::Pillbug
@@ -719,13 +770,11 @@ impl Board {
                 let mut i = marker;
                 while i < turns.len() {
                     let turn = turns[i];
-                    let end = match turn {
-                        Action::Move(_, end) => end,
-                        _ => {
-                            i += 1;
-                            continue;
-                        }
-                    };
+                    if !turn.is_move() {
+                        i += 1;
+                        continue;
+                    }
+                    let end = turn.move_to();
                     if throw_ends.get(end) && turns[first_move..num_throws].contains(&turn) {
                         turns.swap_remove(i);
                     } else {
@@ -756,10 +805,10 @@ impl Board {
                 }
                 if num_left > 0 {
                     if self.turn_num == 0 {
-                        turns.push(Action::Place(TILE_ZERO, bug));
+                        turns.push(Action::place(TILE_ZERO, bug));
                     } else {
                         for &hex in adjacent(TILE_ZERO).iter() {
-                            turns.push(Action::Place(hex, bug));
+                            turns.push(Action::place(hex, bug));
                         }
                     }
                 }
@@ -776,7 +825,7 @@ impl Board {
             self.generate_placements(turns);
         }
         if turns.is_empty() {
-            turns.push(Action::Pass);
+            turns.push(Action::PASS);
         }
     }
 
@@ -832,18 +881,18 @@ impl Board {
     pub fn generate_movements_n(self: &mut Board) -> usize {
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
-            Some(Action::Move(_, dest)) => Some(dest),
+            Some(a) if a.is_move() => Some(a.move_to()),
             _ => None,
         };
         if let Some(moved) = stunned {
-            immovable.set(*moved);
+            immovable.set(moved);
         }
 
         let mut num = 0;
         let mut num_ant = 0;
 
         for hex in self.occupied_tiles[self.color().index()].iter() {
-            if stunned == Some(hex) {
+            if stunned == Some(*hex) {
                 continue;
             }
             if self.tile(*hex).ptype() == Pct::Pillbug
@@ -902,7 +951,7 @@ impl Board {
     pub fn generate_movements_by_pct(self: &mut Board) -> [u16; PCT_COUNT] {
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
-            Some(Action::Move(_, dest)) => Some(*dest),
+            Some(a) if a.is_move() => Some(a.move_to()),
             _ => None,
         };
         if let Some(moved) = stunned {
@@ -971,7 +1020,7 @@ impl Board {
     pub fn generate_movements_by_tile(self: &mut Board) -> [u16; GRID_SIZE] {
         let mut immovable = self.find_cut_vertexes();
         let stunned = match self.turn_history.last() {
-            Some(Action::Move(_, dest)) => Some(*dest),
+            Some(a) if a.is_move() => Some(a.move_to()),
             _ => None,
         };
         if let Some(moved) = stunned {
@@ -1073,8 +1122,8 @@ impl Board {
 fn test_first_move(){
     let mut board = Board::new();
     
-    board.do_action(Action::Place(TILE_ZERO, Pct::Ant));
-    board.do_action(Action::Place(TILE_ZERO + Direction::E, Pct::Ant));
+    board.do_action(Action::place(TILE_ZERO, Pct::Ant));
+    board.do_action(Action::place(TILE_ZERO + Direction::E, Pct::Ant));
 
     for action in board.generate_moves() {
         println!("{:?}", action);

@@ -1,6 +1,4 @@
-use crate::tile::{Tile, GRID_SIZE};
-use crate::board::Action;
-use std::collections::HashSet;
+use crate::tile::{adjacent, Tile, GRID_SIZE};
 
 const TILESET_NUM_WORDS: usize = GRID_SIZE / 32;
 const TILESET_SHIFT: u32 = GRID_SIZE.trailing_zeros() - 5;
@@ -24,45 +22,39 @@ impl TileSet {
         (self.table[tile as usize & TILESET_MASK] >> (tile as u32 >> TILESET_SHIFT)) & 1 != 0
     }
 
+    // NOTE: a combined `test_and_set` (to replace the `if s.get(t) { .. }
+    // s.set(t)` pairing with one load + one store) was tried and MEASURED
+    // WORSE: +2.2% cycles, 1/8 wins. It always stores, whereas the get/set
+    // pair skips the store when the bit is already set - which is the common
+    // case for overlapping neighbourhoods. Don't re-add it.
+
+    /// OR in all six neighbours of `tile` at once.
+    ///
+    /// In this transposed layout (word = tile & 31, bit = tile >> 5) the six
+    /// neighbours - offsets -33,-32,+1,+33,+32,-1 - land in only THREE
+    /// distinct words, two bits each, because the offsets differ by 0 or +-1
+    /// modulo 32. So this does three read-modify-writes instead of six, and
+    /// to three *different* words, so they pipeline instead of serialising.
+    #[inline]
+    pub(crate) fn set_adjacent(&mut self, tile: Tile) {
+        let n = adjacent(tile);
+        // adjacent() yields [NW, NE, E, SE, SW, W] = tile + [-33,-32,+1,+33,+32,-1],
+        // pairing up as (0,5), (1,4), (2,3) by word. Asserted so that
+        // reordering Direction::all() can't silently break this.
+        debug_assert_eq!(n[0] as usize & TILESET_MASK, n[5] as usize & TILESET_MASK);
+        debug_assert_eq!(n[1] as usize & TILESET_MASK, n[4] as usize & TILESET_MASK);
+        debug_assert_eq!(n[2] as usize & TILESET_MASK, n[3] as usize & TILESET_MASK);
+        let bit = |t: Tile| 1u32 << (t as u32 >> TILESET_SHIFT);
+        self.table[n[0] as usize & TILESET_MASK] |= bit(n[0]) | bit(n[5]);
+        self.table[n[1] as usize & TILESET_MASK] |= bit(n[1]) | bit(n[4]);
+        self.table[n[2] as usize & TILESET_MASK] |= bit(n[2]) | bit(n[3]);
+    }
+
     pub fn copy(&self) -> TileSet {
         TileSet {table: self.table}
     }
 }
 
-pub struct ActionContainer {
-    pub moves: Vec<Action>,
-    hashed_moves: HashSet<i32>,
-}
-
-const GRID_SIZE_32: i32 = GRID_SIZE as i32;
-
-impl ActionContainer {
-    
-    pub fn new() -> Self {
-        ActionContainer {
-            moves: Vec::new(),
-            hashed_moves: HashSet::new(),
-        }
-    }
-
-    pub fn push(&mut self, action: Action) {
-        let hash = match action {
-            Action::Place(tile, piece ) => {
-                GRID_SIZE_32 * (piece as i32) + (tile as i32)
-            },
-            Action::Move(start, end) => {
-                GRID_SIZE_32 * GRID_SIZE_32 + GRID_SIZE_32 * (start as i32) + (end as i32)
-            },
-            _ => {-1}
-        };
-
-        if !self.hashed_moves.contains(&hash) {
-            self.moves.push(action);
-            self.hashed_moves.insert(hash);
-        }
-    }   
-
-}
 
 // Keyed only by zobrist_hash: the cached values stored here (e.g. cut
 // vertexes) are structural properties of the piece arrangement and do not

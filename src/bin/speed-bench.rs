@@ -78,7 +78,7 @@ fn main() {
 
                 let chosen_action = if legal_moves.is_empty() {
                     //pb.println("No legal moves available, playing Pass.");
-                    Action::Pass // Play pass if no moves available
+                    Action::PASS // Play pass if no moves available
                 } else {
                     // Select a random move using the seeded RNG
                     *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
@@ -127,7 +127,7 @@ fn main() {
 
             let chosen_action = if legal_moves.is_empty() {
                 pb.println("No legal moves available, playing Pass.");
-                Action::Pass // Play pass if no moves available
+                Action::PASS // Play pass if no moves available
             } else {
                 // Select a random move using the seeded RNG
                 *legal_moves.choose(&mut rng).unwrap() // unwrap is safe here due to is_empty check
