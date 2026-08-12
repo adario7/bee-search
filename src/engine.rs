@@ -170,7 +170,7 @@ impl Engine {
     }
 
     fn last_move_index(b: &Board) -> usize {
-        let last_move = b.turn_history.last().unwrap_or(&Action::PASS);
+        let last_move = b.turn_history.last().unwrap_or(&Action::Pass);
         Self::hist_index(b.color().other(), *last_move)
     }
 
@@ -207,7 +207,7 @@ impl Engine {
     // this rather than through one opaque `&mut ThreadData` parameter.
     fn order_moves(&self, moves: &[Action], board: &Board, history_h: &[i64], countermove: &[Action], pv: Option<Action>, killers: &KillerT, out: &mut MoveInfoList) {
         out.clear();
-        let pv = pv.unwrap_or(Action::PASS);
+        let pv = pv.unwrap_or(Action::Pass);
         let countermove_mv = countermove[Self::last_move_index(board)];
         for &mv in moves {
             out.push(MoveInfo {
@@ -491,7 +491,7 @@ impl Engine {
             if eval >= beta {
                 let r = NMR + (depth - NMR) / 3;
                 let mut nm_klr = Default::default();
-                let pending = td.play_pending(Action::PASS);
+                let pending = td.play_pending(Action::Pass);
                 let value = -self.minimax(pending.td, NodeType::All, ply+1, depth - r, -beta, -beta + 1, &mut nm_klr)?;
                 drop(pending);
                 if value >= beta {
@@ -644,7 +644,7 @@ impl Engine {
                         completed_depth: th_compl,
                         deadline,
                         history_h: vec![0; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
-                        countermove: vec![Action::PASS; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
+                        countermove: vec![Action::Pass; 2 * (GRID_SIZE + PCT_COUNT) * GRID_SIZE + 1],
                         local_nodes: 0,
                         last_vote: None,
                         // Sized to cover every representable ply (Depth is u8).
@@ -674,7 +674,7 @@ impl Engine {
             }
             eprintln!();
         }
-        let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::PASS);
+        let best_move = root_votes.first().map(|(mv, _)| *mv).unwrap_or(Action::Pass);
         (value, best_move)
     }
 
@@ -692,8 +692,8 @@ impl Engine {
             eprint!("pv: ");
             let mut bb = board.clone();
             for _ in 0..16 {
-                let mv = self.tt.get(bb.zobrist_hash).map(|e| e.pv).unwrap_or(Action::PASS);
-                if mv == Action::PASS { break; }
+                let mv = self.tt.get(bb.zobrist_hash).map(|e| e.pv).unwrap_or(Action::Pass);
+                if mv == Action::Pass { break; }
                 eprint!("{};", bb.action_to_string(mv));
                 bb.do_action(mv);
             }

@@ -169,11 +169,16 @@ pub enum ActionKind {
     Pass,
 }
 
+// Deliberately named like the old enum variants (`Action::Place`,
+// `Action::Move`, `Action::Pass`) rather than snake_case constructors, so
+// that switching from an enum to this packed struct did not churn ~47
+// otherwise-untouched call sites. The lint allows below are the price.
+#[allow(non_snake_case, non_upper_case_globals)]
 impl Action {
-    pub const PASS: Action = Action(ACT_TAG_PASS << ACT_TAG_SHIFT);
+    pub const Pass: Action = Action(ACT_TAG_PASS << ACT_TAG_SHIFT);
 
     #[inline]
-    pub fn place(tile: Tile, pct: PieceType) -> Action {
+    pub fn Place(tile: Tile, pct: PieceType) -> Action {
         debug_assert!((tile as usize) < GRID_SIZE);
         Action((ACT_TAG_PLACE << ACT_TAG_SHIFT)
             | ((tile as u32 & ACT_TILE_MASK) << 3)
@@ -181,7 +186,7 @@ impl Action {
     }
 
     #[inline]
-    pub fn mv(from: Tile, to: Tile) -> Action {
+    pub fn Move(from: Tile, to: Tile) -> Action {
         debug_assert!((from as usize) < GRID_SIZE && (to as usize) < GRID_SIZE);
         Action((ACT_TAG_MOVE << ACT_TAG_SHIFT)
             | ((from as u32 & ACT_TILE_MASK) << 10)
@@ -225,7 +230,7 @@ impl Default for Action {
     // Must stay Pass: `KillerT` and `countermove` are built with
     // `Default::default()` and rely on the empty slot meaning "no move".
     #[inline]
-    fn default() -> Self { Action::PASS }
+    fn default() -> Self { Action::Pass }
 }
 
 impl std::fmt::Debug for Action {
@@ -556,11 +561,11 @@ mod test {
         let mut board = Board::new();
         let a = TILE_ZERO;
         let b = TILE_ZERO + 1;
-        board.do_action(Action::place(a, PieceType::Queen));
+        board.do_action(Action::Place(a, PieceType::Queen));
         assert_eq!(board.placeable[Color::White.index()][PieceType::Queen as usize], 0);
-        board.do_action(Action::place(b, PieceType::Queen));
+        board.do_action(Action::Place(b, PieceType::Queen));
         assert_eq!(board.placeable[Color::Black.index()][PieceType::Queen as usize], 0);
-        board.do_action(Action::mv(a, b));
+        board.do_action(Action::Move(a, b));
         assert_eq!(board.world[a as usize], Piece::empty());
         assert_eq!(board.world[b as usize], Piece::make(Color::White, PieceType::Queen, 1));
         assert_eq!(board.underworld_at(b)[0], Piece::make(Color::Black, PieceType::Queen, 1));
@@ -577,22 +582,22 @@ mod test {
         let mut board = Board::new();
         let a = TILE_ZERO;
         let b = TILE_ZERO + Direction::E + Direction::E + Direction::E;
-        board.do_action(Action::place(a, PieceType::Queen));
-        board.do_action(Action::place(b, PieceType::Queen));
+        board.do_action(Action::Place(a, PieceType::Queen));
+        board.do_action(Action::Place(b, PieceType::Queen));
         assert_eq!(board.game_result(), GameResult::InProgress);
         for &d in Direction::all() {
             let pct = Pct::iter_all().filter(|&p| board.placeable[0][p as usize] > 0).next().unwrap();
-            board.do_action(Action::place(b + d, pct));
+            board.do_action(Action::Place(b + d, pct));
             println!("{} {:?} {:?}", board.turn_num, d, pct);
             if board.turn_num == 1+6*2 {
                 assert_eq!(board.game_result(), GameResult::Winner(Color::White));
             } else {
                 assert_eq!(board.game_result(), GameResult::InProgress);
             }
-            board.do_action(Action::place(a + d, pct));
+            board.do_action(Action::Place(a + d, pct));
         }
         assert_eq!(board.game_result(), GameResult::Draw);
-        board.do_action(Action::mv(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
+        board.do_action(Action::Move(b + Direction::E, a + Direction::W + Direction::W + Direction::W));
         assert_eq!(board.game_result(), GameResult::Winner(Color::Black));
     }
 
@@ -659,8 +664,8 @@ mod test {
                     b1.do_action(moves[mov]);
                     b2.do_action(moves[mov]);
                 }else {
-                    b1.do_action(Action::PASS);
-                    b2.do_action(Action::PASS);
+                    b1.do_action(Action::Pass);
+                    b2.do_action(Action::Pass);
                 }
                 assert!(compare_boards(&mut b1, &mut b2));
                 assert!(b1.zobrist_hash == b2.zobrist_hash);
@@ -690,14 +695,14 @@ mod test {
                     let mov1 = rng.random_range(0..moves1.len());
                     b1.do_action(moves1[mov1]);
                 }else {
-                    b1.do_action(Action::PASS);
+                    b1.do_action(Action::Pass);
                 }
                 let moves2 = b2.generate_moves();
                 if moves2.len() > 0 {
                     let mov2 = rng.random_range(0..moves2.len());
                     b2.do_action(moves2[mov2]);
                 }else {
-                    b2.do_action(Action::PASS);
+                    b2.do_action(Action::Pass);
                 }
                 assert_eq!(compare_boards(&mut b1, &mut b2), b1.zobrist_hash == b2.zobrist_hash);
             }
@@ -720,18 +725,18 @@ mod action_repr_test {
         assert_eq!(std::mem::size_of::<Action>(), 4, "Action must be 4 bytes");
         assert_eq!(std::mem::size_of::<ActionList>(), 4 * 256 + 8);
         // Default must remain Pass.
-        assert_eq!(Action::default(), Action::PASS);
-        assert!(Action::PASS.is_pass());
+        assert_eq!(Action::default(), Action::Pass);
+        assert!(Action::Pass.is_pass());
         // Exhaustive round-trip over the whole encodable space.
         for t in 0..GRID_SIZE as Tile {
             for p in 0..8u8 {
                 let pct = PieceType::from_index(p);
-                let a = Action::place(t, pct);
+                let a = Action::Place(t, pct);
                 assert!(a.is_place());
                 assert_eq!(a.kind(), ActionKind::Place(t, pct));
             }
             for &f in &[0u16, 1, 511, 1022, 1023] {
-                let a = Action::mv(f, t);
+                let a = Action::Move(f, t);
                 assert!(a.is_move());
                 assert_eq!(a.kind(), ActionKind::Move(f, t));
                 assert_eq!(a.move_from(), f);
@@ -749,15 +754,15 @@ mod action_repr_test {
         let mut reference = Vec::new();
         for t in (0..GRID_SIZE as Tile).step_by(37) {
             for p in 0..8u8 {
-                packed.push(Action::place(t, PieceType::from_index(p)));
+                packed.push(Action::Place(t, PieceType::from_index(p)));
                 reference.push((0u8, t, p as u16));
             }
             for f in (0..GRID_SIZE as Tile).step_by(101) {
-                packed.push(Action::mv(f, t));
+                packed.push(Action::Move(f, t));
                 reference.push((1u8, f, t));
             }
         }
-        packed.push(Action::PASS);
+        packed.push(Action::Pass);
         reference.push((2u8, 0, 0));
 
         let mut by_packed: Vec<usize> = (0..packed.len()).collect();

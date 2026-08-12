@@ -229,7 +229,7 @@ impl Board {
     pub fn parse_action(&self, move_string: &str) -> UhpResult<Action> {
         let err = || UhpError::InvalidMove(move_string.to_owned());
         if move_string == "pass" {
-            return Ok(Action::PASS);
+            return Ok(Action::Pass);
         }
         let tokens = move_string.split(' ').collect::<Vec<_>>();
         let (piece, _) = self.parse_piece_direction(tokens[0]).ok_or_else(err)?;
@@ -238,7 +238,7 @@ impl Board {
             if tokens.len() != 1 {
                 return Err(err());
             }
-            return Ok(Action::place(TILE_ZERO, piece.ptype()));
+            return Ok(Action::Place(TILE_ZERO, piece.ptype()));
         }
         // other turns have two operands
         if tokens.len() != 2 {
@@ -247,8 +247,8 @@ impl Board {
         let start = self.find_piece(piece);
         let end = self.parse_tile(tokens[1]).ok_or_else(err)?;
         Ok(match start {
-            Some(start) => Action::mv(start, end),
-            None => Action::place(end, piece.ptype()),
+            Some(start) => Action::Move(start, end),
+            None => Action::Place(end, piece.ptype()),
         })
     }
 

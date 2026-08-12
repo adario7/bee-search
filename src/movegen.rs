@@ -317,7 +317,7 @@ impl Board {
     fn generate_stack_walking(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent_beetle(&mut buf, hex, hex) {
-            turns.push(Action::mv(hex, adj));
+            turns.push(Action::Move(hex, adj));
         }
     }
 
@@ -341,7 +341,7 @@ impl Board {
                 }
             }
             if dist > 1 {
-                turns.push(Action::mv(hex, jump));
+                turns.push(Action::Move(hex, jump));
             }
         }
     }
@@ -370,7 +370,7 @@ impl Board {
     fn generate_walk1(&self, hex: Tile, turns: &mut ActionList) {
         let mut buf = [0; 6];
         for adj in self.slidable_adjacent(&mut buf, hex, hex) {
-            turns.push(Action::mv(hex, adj));
+            turns.push(Action::Move(hex, adj));
         }
     }
 
@@ -386,7 +386,7 @@ impl Board {
                 if s2 != orig {
                     for s3 in self.slidable_adjacent(&mut buf3, orig, s2) {
                         if s3 != s1 && !visited.get(s3) {
-                            turns.push(Action::mv(orig, s3));
+                            turns.push(Action::Move(orig, s3));
                             visited.set(s3);
                         }
                     }
@@ -437,7 +437,7 @@ impl Board {
             }
             visited.set(node);
             if node != orig {
-                turns.push(Action::mv(orig, node));
+                turns.push(Action::Move(orig, node));
             }
             for adj in self.slidable_adjacent(&mut buf, orig, node) {
                 if !visited.get(adj) {
@@ -517,7 +517,7 @@ impl Board {
                         for s3 in self.slidable_adjacent_beetle(&mut buf3, hex, s2) {
                             if !self.occupied(s3) && !step3.get(s3) {
                                 step3.set(s3);
-                                turns.push(Action::mv(hex, s3));
+                                turns.push(Action::Move(hex, s3));
                             }
                         }
                     }
@@ -578,7 +578,7 @@ impl Board {
         }
         for &start in starts[..num_starts].iter() {
             for &end in ends[..num_ends].iter() {
-                turns.push(Action::mv(start, end));
+                turns.push(Action::Move(start, end));
                 throw_starts.set(start);
                 throw_ends.set(end);
             }
@@ -805,10 +805,10 @@ impl Board {
                 }
                 if num_left > 0 {
                     if self.turn_num == 0 {
-                        turns.push(Action::place(TILE_ZERO, bug));
+                        turns.push(Action::Place(TILE_ZERO, bug));
                     } else {
                         for &hex in adjacent(TILE_ZERO).iter() {
-                            turns.push(Action::place(hex, bug));
+                            turns.push(Action::Place(hex, bug));
                         }
                     }
                 }
@@ -825,7 +825,7 @@ impl Board {
             self.generate_placements(turns);
         }
         if turns.is_empty() {
-            turns.push(Action::PASS);
+            turns.push(Action::Pass);
         }
     }
 
@@ -1122,8 +1122,8 @@ impl Board {
 fn test_first_move(){
     let mut board = Board::new();
     
-    board.do_action(Action::place(TILE_ZERO, Pct::Ant));
-    board.do_action(Action::place(TILE_ZERO + Direction::E, Pct::Ant));
+    board.do_action(Action::Place(TILE_ZERO, Pct::Ant));
+    board.do_action(Action::Place(TILE_ZERO + Direction::E, Pct::Ant));
 
     for action in board.generate_moves() {
         println!("{:?}", action);

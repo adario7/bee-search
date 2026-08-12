@@ -30,7 +30,7 @@ fn make_positions() -> Vec<Board> {
             }
             let moves = board.generate_moves();
             let mv = if moves.is_empty() {
-                Action::PASS
+                Action::Pass
             } else {
                 *moves.choose(&mut rng).unwrap()
             };

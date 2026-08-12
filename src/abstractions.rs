@@ -22,11 +22,23 @@ impl TileSet {
         (self.table[tile as usize & TILESET_MASK] >> (tile as u32 >> TILESET_SHIFT)) & 1 != 0
     }
 
-    // NOTE: a combined `test_and_set` (to replace the `if s.get(t) { .. }
-    // s.set(t)` pairing with one load + one store) was tried and MEASURED
-    // WORSE: +2.2% cycles, 1/8 wins. It always stores, whereas the get/set
-    // pair skips the store when the bit is already set - which is the common
-    // case for overlapping neighbourhoods. Don't re-add it.
+    // Two "obvious" batching ideas here were tried and MEASURED WORSE. Both
+    // fail for the same reason: the per-tile form short-circuits on the
+    // common case, and doing the work eagerly for all six costs more than
+    // the memory traffic it saves. Don't re-add either without re-measuring.
+    //
+    //  * `test_and_set` (one load + one store instead of a get then a set):
+    //    +2.2% cycles, 1/8 wins. It always stores, whereas `if get { .. }
+    //    set` skips the store when the bit is already set - the common case
+    //    for overlapping neighbourhoods.
+    //  * `get_adjacent_mask` (test all six neighbours with 3 word loads
+    //    instead of 6, returning a 6-bit mask): +8.1% cycles, 0/8 wins, and
+    //    it even raised the instruction count. Building the mask costs ~12
+    //    extra ALU ops, and callers no longer exit early.
+    //
+    // `set_adjacent` below is the batching that DOES pay (-9.4% cycles),
+    // because its six writes are unconditional anyway - there is no
+    // short-circuit to lose.
 
     /// OR in all six neighbours of `tile` at once.
     ///
