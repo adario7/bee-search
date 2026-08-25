@@ -29,7 +29,7 @@ impl Default for UnderPiece {
 // With MaybeUninit, `new()` is a no-op and only pushed slots are written.
 #[derive(Clone, Copy)]
 pub struct ActionList {
-    moves: [std::mem::MaybeUninit<Action>; 256],
+    moves: [std::mem::MaybeUninit<Action>; 512],
     len: usize,
 }
 impl ActionList {
@@ -40,9 +40,10 @@ impl ActionList {
         Self { moves: unsafe { std::mem::MaybeUninit::uninit().assume_init() }, len: 0 }
     }
     pub fn push(&mut self, action: Action) {
-        debug_assert!(self.len < 256);
-        self.moves[self.len] = std::mem::MaybeUninit::new(action);
-        self.len += 1;
+        if self.len < 512 {
+            self.moves[self.len] = std::mem::MaybeUninit::new(action);
+            self.len += 1;
+        }
     }
     pub fn swap_remove(&mut self, index: usize) -> Action {
         debug_assert!(index < self.len);

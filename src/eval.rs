@@ -1,8 +1,9 @@
-use crate::{board::{ActionList, Board}, eval_mlp::mlp_inference, tile::adjacent};
+use crate::{ board::{ActionList, Board}, piece::Color, eval_gt::gt_inference_fast, eval_mlp::mlp_inference, tile::adjacent, };
 
 pub type Eval = i16;
 pub type Value = Eval;
 
+pub const GT_EVAL: bool = true;
 pub const MLP_EVAL: bool = true;
 pub const FEATURES_EVAL: bool = true;
 
@@ -32,7 +33,15 @@ impl Board {
     }
 
     pub fn static_eval_fast(&mut self, my_moves: &ActionList) -> Eval {
-        if MLP_EVAL {
+        if GT_EVAL {
+            let tg = self.get_token_graph_fast(my_moves);
+            let eval_white = gt_inference_fast(&tg.features, &tg.adj);
+            if self.color() == Color::White {
+                eval_white
+            } else {
+                -eval_white
+            }
+        } else if MLP_EVAL {
             let f = self.features_fast(my_moves);
             mlp_inference(&f)
         } else if FEATURES_EVAL {

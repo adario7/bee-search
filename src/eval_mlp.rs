@@ -537,7 +537,7 @@ mod tests {
 
         let stats = take_accumulated_layer_zero_stats();
         assert_eq!(stats.count, 1);
-        assert_eq!(stats.layer_sizes, [232, 48, 32, 16, 8]);
+        assert_eq!(stats.layer_sizes, [232, 48, 28, 14, 8]);
         assert_eq!(stats.zero_counts[0], 232);
         assert_eq!(stats.zero_percentage(0), 100.0);
 

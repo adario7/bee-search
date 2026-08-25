@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::board::Board;
 use crate::engine::{Depth, Engine};
-use crate::eval::{FEATURES_EVAL, MLP_EVAL};
+use crate::eval::{FEATURES_EVAL, MLP_EVAL, GT_EVAL};
 use crate::perft;
 
 const FORCE_ST: bool = false;
@@ -106,7 +106,8 @@ impl Uhp {
         let version = env!("CARGO_PKG_VERSION");
         let hash = env!("GIT_HASH");
         print!("id bee-search {}-{}", version, hash);
-        if MLP_EVAL { print!("-MLP"); }
+        if GT_EVAL { print!("-GT"); }
+        else if MLP_EVAL { print!("-MLP"); }
         else if FEATURES_EVAL { print!("-F"); }
         if FORCE_ST { print!("-ST"); }
         if cfg!(debug_assertions) { print!("-DEBUG"); }

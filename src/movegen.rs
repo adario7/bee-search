@@ -35,7 +35,7 @@ impl Board {
         }
     }
 
-    fn generate_placements_n(self: &Board) -> usize {
+    pub(crate) fn generate_placements_n(self: &Board) -> usize {
         let mut no_placement = TileSet::new();
         for &enemy in self.occupied_tiles[self.color().other().index()].iter() {
             for adj in adjacent(enemy) {
