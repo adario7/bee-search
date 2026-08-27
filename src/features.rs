@@ -1,4 +1,4 @@
-use crate::{abstractions::TileSet, board::{Action, ActionList, Board}, piece::Color, piece_type::PCT_COUNT, tile::adjacent};
+use crate::{abstractions::TileSet, board::{Action, ActionList, Board}, movegen::OtherMoves, piece::Color, piece_type::PCT_COUNT, tile::adjacent};
 
 impl Board {
     pub const FN: usize = 4 + PCT_COUNT*6;
@@ -125,6 +125,49 @@ impl Board {
         }
         self.features_for_both(my_n)
     }
+
+    fn features_fn2_for_both(
+        &mut self,
+        my_n: [u16; PCT_COUNT],
+        other_n: [u16; PCT_COUNT],
+    ) -> [i16; Self::FN2] {
+        let immovable = self.find_cut_vertexes();
+        let mut out = [0; Self::FN2];
+        self.features_for(self.color(), my_n, &immovable, &mut out[0..Self::FN]);
+        self.features_for(self.color().other(), other_n, &immovable, &mut out[Self::FN..Self::FN2]);
+        out
+    }
+
+    pub fn features_fn2_fast(
+        &mut self,
+        moves: &ActionList,
+        other: &OtherMoves,
+    ) -> [i16; Self::FN2] {
+        let mut my_n = [0; PCT_COUNT];
+        for action in moves {
+            if let Action::Move(from, _) = action {
+                my_n[self.tile(*from).ptype().index()] += 1;
+            }
+        }
+        let other_n = other.to_pct_moves(self);
+        self.features_fn2_for_both(my_n, other_n)
+    }
+
+    pub fn features_fn2_absolute_fast(
+        &mut self,
+        moves: &ActionList,
+        other: &OtherMoves,
+    ) -> [i16; Self::FN2] {
+        let rel = self.features_fn2_fast(moves, other);
+        if self.color() == Color::White {
+            rel
+        } else {
+            let mut abs = [0; Self::FN2];
+            abs[0..Self::FN].copy_from_slice(&rel[Self::FN..Self::FN2]);
+            abs[Self::FN..Self::FN2].copy_from_slice(&rel[0..Self::FN]);
+            abs
+        }
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +198,18 @@ mod tests {
         for (i, &u) in used.iter().enumerate() {
             assert!(u, "Index {} was never used", i);
         }
+    }
+
+    #[test]
+    fn test_features_fn2_runs() {
+        let mut board = Board::new();
+        let moves = board.generate_moves();
+        let other = board.other_moves();
+
+        let fn2 = board.features_fn2_absolute_fast(&moves, &other);
+        let tg = board.get_token_graph_fast(&moves, &other);
+        assert_eq!(fn2.len(), Board::FN2);
+        assert_eq!(tg.features.len(), 28);
     }
 }
 

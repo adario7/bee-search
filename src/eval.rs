@@ -34,8 +34,14 @@ impl Board {
 
     pub fn static_eval_fast(&mut self, my_moves: &ActionList) -> Eval {
         if GT_EVAL {
-            let tg = self.get_token_graph_fast(my_moves);
-            let eval_white = gt_inference_fast(&tg.features, &tg.adj);
+            let other = self.other_moves();
+            let tg = self.get_token_graph_fast(my_moves, &other);
+            let fn2_raw = self.features_fn2_absolute_fast(my_moves, &other);
+            let mut fn2_f32 = [0.0f32; Board::FN2];
+            for i in 0..Board::FN2 {
+                fn2_f32[i] = fn2_raw[i] as f32;
+            }
+            let eval_white = gt_inference_fast(&tg.features, &tg.adj, &fn2_f32);
             if self.color() == Color::White {
                 eval_white
             } else {

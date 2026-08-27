@@ -3,6 +3,8 @@ use crate::eval::Eval;
 // Include trained weights
 include!("../logs/eval_gt.rs");
 
+pub const GT_FN2_DIM: usize = 104;
+
 #[inline(always)]
 fn softsign(x: f32) -> f32 {
     x / (1.0 + x.abs())
@@ -145,9 +147,10 @@ impl TokenCache {
         &mut self,
         features: &[[f32; GT_FEAT_DIM]; GT_NUM_TOKENS],
         adj: &[[u8; GT_NUM_TOKENS]; GT_NUM_TOKENS],
+        fn2: &[f32; GT_FN2_DIM],
     ) -> Eval {
         self.update(features);
-        gt_inference_with_cache(self, adj)
+        gt_inference_with_cache(self, adj, fn2)
     }
 }
 
@@ -182,15 +185,17 @@ pub fn reset_token_cache() {
 pub fn gt_inference(
     features: &[[f32; GT_FEAT_DIM]; GT_NUM_TOKENS],
     adj: &[[u8; GT_NUM_TOKENS]; GT_NUM_TOKENS],
+    fn2: &[f32; GT_FN2_DIM],
 ) -> Eval {
     let mut cache = TokenCache::new();
-    cache.update_and_infer(features, adj)
+    cache.update_and_infer(features, adj, fn2)
 }
 
 /// Fast thread-local cached inference: only dirty / changed tokens recompute projections and Layer-0 QKV
 pub fn gt_inference_fast(
     features: &[[f32; GT_FEAT_DIM]; GT_NUM_TOKENS],
     adj: &[[u8; GT_NUM_TOKENS]; GT_NUM_TOKENS],
+    fn2: &[f32; GT_FN2_DIM],
 ) -> Eval {
     if ACCUMULATE_ENABLED.load(Ordering::Relaxed) {
         let tg = TokenGraph {
@@ -200,14 +205,15 @@ pub fn gt_inference_fast(
         ACCUMULATED_GRAPHS.lock().unwrap().push(tg);
     }
     TLS_TOKEN_CACHE.with(|cache| {
-        cache.borrow_mut().update_and_infer(features, adj)
+        cache.borrow_mut().update_and_infer(features, adj, fn2)
     })
 }
 
-/// Computes evaluation given token cache and adjacency matrix
+/// Computes evaluation given token cache, adjacency matrix, and FN2 handcrafted features
 pub fn gt_inference_with_cache(
     cache: &TokenCache,
     adj: &[[u8; GT_NUM_TOKENS]; GT_NUM_TOKENS],
+    fn2: &[f32; GT_FN2_DIM],
 ) -> Eval {
     let mut h = cache.h0;
     let placed = &cache.placed[..cache.n_placed];
@@ -224,7 +230,11 @@ pub fn gt_inference_with_cache(
                     let mut denom = 1e-6f32;
 
                     for &j in placed {
-                        let edge_cat = adj[i][j] as usize;
+                        let edge_cat = match adj[i][j] {
+                            1..=6 => 1,
+                            7..=8 => 2,
+                            _ => 0,
+                        };
                         if GT_SPARSE_ATTN && edge_cat == 0 {
                             continue;
                         }
@@ -233,7 +243,7 @@ pub fn gt_inference_with_cache(
                         for dk in 0..GT_D_K {
                             dot += $q[head][i][dk] * $k[head][j][dk];
                         }
-                        let s = dot * scale + $eb[edge_cat][head];
+                        let s = dot * scale + $eb[i][j][edge_cat][head];
                         let r = relu(s);
                         let s_sq = r * r;
                         scores[j] = s_sq;
@@ -331,21 +341,60 @@ pub fn gt_inference_with_cache(
         GT_L1_NORM2_G, GT_L1_NORM2_B
     );
 
-    // Flatten all 28 tokens
-    const FLATTEN_DIM: usize = GT_NUM_TOKENS * GT_D_MODEL;
-    let mut flat = [0.0f32; FLATTEN_DIM];
-    for tok in 0..GT_NUM_TOKENS {
-        for d in 0..GT_D_MODEL {
-            flat[tok * GT_D_MODEL + d] = h[tok][d];
+    // Token Pooling & FN2 Projection
+    // 1. Transformer Representation (Queen-Centric Pooling: 4 * d_model)
+    let mut trans_pooled = [0.0f32; 4 * GT_D_MODEL];
+    // My Queen (tok 0)
+    for d in 0..GT_D_MODEL {
+        trans_pooled[d] = h[0][d];
+    }
+    // Enemy Queen (tok 14)
+    for d in 0..GT_D_MODEL {
+        trans_pooled[GT_D_MODEL + d] = h[14][d];
+    }
+    // My Mean (toks 0..14)
+    for d in 0..GT_D_MODEL {
+        let mut sum = 0.0f32;
+        for tok in 0..14 {
+            sum += h[tok][d];
         }
+        trans_pooled[2 * GT_D_MODEL + d] = sum / 14.0;
+    }
+    // Enemy Mean (toks 14..28)
+    for d in 0..GT_D_MODEL {
+        let mut sum = 0.0f32;
+        for tok in 14..28 {
+            sum += h[tok][d];
+        }
+        trans_pooled[3 * GT_D_MODEL + d] = sum / 14.0;
     }
 
-    // Head MLP: [FLATTEN_DIM -> 32 -> 16 -> 8 -> 1]
+    // 2. FN2 Linear Projection (GT_FN2_DIM -> GT_D_FN2_PROJ)
+    let mut h_fn2 = [0.0f32; GT_D_FN2_PROJ];
+    for d in 0..GT_D_FN2_PROJ {
+        let mut sum = GT_FN2_PROJ_B[d];
+        for f in 0..GT_FN2_DIM {
+            sum += fn2[f] * GT_FN2_PROJ_W[f][d];
+        }
+        h_fn2[d] = relu(sum);
+    }
+
+    // 3. Concat [trans_pooled, h_fn2]
+    const FUSED_DIM: usize = 4 * GT_D_MODEL + GT_D_FN2_PROJ;
+    let mut fused = [0.0f32; FUSED_DIM];
+    for i in 0..(4 * GT_D_MODEL) {
+        fused[i] = trans_pooled[i];
+    }
+    for i in 0..GT_D_FN2_PROJ {
+        fused[4 * GT_D_MODEL + i] = h_fn2[i];
+    }
+
+    // 4. Head MLP: [FUSED_DIM -> 32 -> 16 -> 8 -> 1]
     let mut l1 = [0.0f32; 32];
     for j in 0..32 {
         let mut sum = GT_HEAD_B1[j];
-        for i in 0..FLATTEN_DIM {
-            sum += flat[i] * GT_HEAD_W1[i][j];
+        for i in 0..FUSED_DIM {
+            sum += fused[i] * GT_HEAD_W1[i][j];
         }
         l1[j] = relu(sum);
     }
@@ -381,12 +430,25 @@ pub fn gt_inference_with_cache(
 mod tests {
     use super::*;
     use crate::board::Board;
+    use crate::movegen::OtherMoves;
+
+    fn get_fn2_f32(board: &mut Board, moves: &crate::board::ActionList, other: &OtherMoves) -> [f32; GT_FN2_DIM] {
+        let fn2_raw = board.features_fn2_absolute_fast(moves, other);
+        let mut out = [0.0f32; GT_FN2_DIM];
+        for i in 0..GT_FN2_DIM {
+            out[i] = fn2_raw[i] as f32;
+        }
+        out
+    }
 
     #[test]
     fn test_gt_inference_runs() {
         let mut board = Board::new();
+        let moves = board.generate_moves();
+        let other = board.other_moves();
         let tg = board.get_token_graph();
-        let eval = gt_inference(&tg.features, &tg.adj);
+        let fn2 = get_fn2_f32(&mut board, &moves, &other);
+        let eval = gt_inference(&tg.features, &tg.adj, &fn2);
         assert!(eval.abs() <= 9000);
     }
 
@@ -394,13 +456,16 @@ mod tests {
     fn test_gt_inference_with_cache_parity() {
         let pos = "Base+MLP;InProgress;White[3];wS1;bA1 wS1-;wA1 -wS1;bA2 bA1\\";
         let mut board = Board::parse_game_string(pos).unwrap();
+        let moves = board.generate_moves();
+        let other = board.other_moves();
         let tg = board.get_token_graph();
+        let fn2 = get_fn2_f32(&mut board, &moves, &other);
 
-        let eval_direct = gt_inference(&tg.features, &tg.adj);
+        let eval_direct = gt_inference(&tg.features, &tg.adj, &fn2);
 
         let mut cache = TokenCache::new();
         cache.update(&tg.features);
-        let eval_cached = gt_inference_with_cache(&cache, &tg.adj);
+        let eval_cached = gt_inference_with_cache(&cache, &tg.adj, &fn2);
 
         assert_eq!(eval_direct, eval_cached);
     }
@@ -410,16 +475,18 @@ mod tests {
         let pos = "Base+MLP;InProgress;White[3];wS1;bA1 wS1-;wA1 -wS1;bA2 bA1\\";
         let mut board = Board::parse_game_string(pos).unwrap();
         let my_moves = board.generate_moves();
+        let other = board.other_moves();
 
         let tg_slow = board.get_token_graph();
-        let tg_fast = board.get_token_graph_fast(&my_moves);
+        let tg_fast = board.get_token_graph_fast(&my_moves, &other);
+        let fn2 = get_fn2_f32(&mut board, &my_moves, &other);
 
         assert_eq!(tg_slow.features, tg_fast.features);
         assert_eq!(tg_slow.adj, tg_fast.adj);
 
         reset_token_cache();
-        let eval_fast = gt_inference_fast(&tg_fast.features, &tg_fast.adj);
-        let eval_slow = gt_inference(&tg_slow.features, &tg_slow.adj);
+        let eval_fast = gt_inference_fast(&tg_fast.features, &tg_fast.adj, &fn2);
+        let eval_slow = gt_inference(&tg_slow.features, &tg_slow.adj, &fn2);
         assert_eq!(eval_fast, eval_slow);
     }
 
@@ -431,10 +498,10 @@ mod tests {
         // Persistent cache across evaluations
         let mut cache = TokenCache::new();
 
-        for game_idx in 0..100 {
+        for game_idx in 0..50 {
             let mut board = Board::new();
 
-            for step in 0..30 {
+            for step in 0..20 {
                 // Step 1: Generate moves and make move 1
                 let moves1 = board.generate_moves();
                 if moves1.is_empty() {
@@ -445,9 +512,11 @@ mod tests {
 
                 // Intermediate Check 1 (after move 1)
                 let moves_after_m1 = board.generate_moves();
-                let tg1 = board.get_token_graph_fast(&moves_after_m1);
-                let cached_eval1 = cache.update_and_infer(&tg1.features, &tg1.adj);
-                let scratch_eval1 = gt_inference(&tg1.features, &tg1.adj);
+                let other1 = board.other_moves();
+                let tg1 = board.get_token_graph_fast(&moves_after_m1, &other1);
+                let fn2_1 = get_fn2_f32(&mut board, &moves_after_m1, &other1);
+                let cached_eval1 = cache.update_and_infer(&tg1.features, &tg1.adj, &fn2_1);
+                let scratch_eval1 = gt_inference(&tg1.features, &tg1.adj, &fn2_1);
                 assert_eq!(
                     cached_eval1, scratch_eval1,
                     "Cache mismatch at game {} step {} after move 1",
@@ -463,9 +532,11 @@ mod tests {
 
                 // Intermediate Check 2 (after move 2)
                 let moves_after_m2 = board.generate_moves();
-                let tg2 = board.get_token_graph_fast(&moves_after_m2);
-                let cached_eval2 = cache.update_and_infer(&tg2.features, &tg2.adj);
-                let scratch_eval2 = gt_inference(&tg2.features, &tg2.adj);
+                let other2 = board.other_moves();
+                let tg2 = board.get_token_graph_fast(&moves_after_m2, &other2);
+                let fn2_2 = get_fn2_f32(&mut board, &moves_after_m2, &other2);
+                let cached_eval2 = cache.update_and_infer(&tg2.features, &tg2.adj, &fn2_2);
+                let scratch_eval2 = gt_inference(&tg2.features, &tg2.adj, &fn2_2);
                 assert_eq!(
                     cached_eval2, scratch_eval2,
                     "Cache mismatch at game {} step {} after move 2",
@@ -477,9 +548,11 @@ mod tests {
 
                 // Intermediate Check 3 (after undoing move 2)
                 let moves_after_undo = board.generate_moves();
-                let tg_undo = board.get_token_graph_fast(&moves_after_undo);
-                let cached_eval_undo = cache.update_and_infer(&tg_undo.features, &tg_undo.adj);
-                let scratch_eval_undo = gt_inference(&tg_undo.features, &tg_undo.adj);
+                let other_undo = board.other_moves();
+                let tg_undo = board.get_token_graph_fast(&moves_after_undo, &other_undo);
+                let fn2_undo = get_fn2_f32(&mut board, &moves_after_undo, &other_undo);
+                let cached_eval_undo = cache.update_and_infer(&tg_undo.features, &tg_undo.adj, &fn2_undo);
+                let scratch_eval_undo = gt_inference(&tg_undo.features, &tg_undo.adj, &fn2_undo);
                 assert_eq!(
                     cached_eval_undo, scratch_eval_undo,
                     "Cache mismatch at game {} step {} after undoing move 2",

@@ -50,9 +50,13 @@ PIECE_TYPE_NAMES = [
     "Black Beetle", "Black Mosquito", "Black Ladybug", "Black Pillbug",
 ]
 
+FN_DIM = 52
+FN2_DIM = 104
+
 SAMPLE_DTYPE = np.dtype([
     ('features', np.float32, (NUM_TOKENS, TOKEN_FEAT_DIM)),
     ('adj', np.uint8, (NUM_TOKENS, NUM_TOKENS)),
+    ('fn2', np.float32, (FN2_DIM,)),
     ('eval', np.float32),
     ('winner', np.float32),
     ('static_eval', np.float32),
@@ -77,29 +81,37 @@ class LazyBinaryGraphDataset(Dataset):
     """
     Zero-RAM Memory-Mapped Dataset.
     Directly indexes disk memory-map without pre-allocating or copying data into RAM.
-    Performs on-the-fly symmetric augmentation and converts adj to int64 only when requested.
+    Performs on-the-fly 8x symmetric augmentation:
+      2 color states (White / Black POV)
+      x 4 spatial reflections (Identity, Flip X, Flip Y, Flip Both X & Y).
     """
     def __init__(self, raw_mmap, indices, sample_weights=None, augment=True):
         self.raw_mmap = raw_mmap
         self.indices = np.asarray(indices, dtype=np.int64)
         self.sample_weights = sample_weights
         self.augment = augment
-        self.multiplier = 2 if augment else 1
+        self.multiplier = 8 if augment else 1
 
     def __len__(self):
         return len(self.indices) * self.multiplier
 
     def __getitem__(self, idx):
         if self.augment:
-            orig_idx = self.indices[idx // 2]
-            is_swapped = (idx % 2 == 1)
+            orig_idx = self.indices[idx // 8]
+            aug_type = idx % 8
+            is_swapped = (aug_type % 2 == 1)
+            flip_x = (aug_type in (2, 3, 6, 7))
+            flip_y = (aug_type in (4, 5, 6, 7))
         else:
             orig_idx = self.indices[idx]
             is_swapped = False
+            flip_x = False
+            flip_y = False
 
         record = self.raw_mmap[orig_idx]
-        features = record['features']  # (28, 8) float32
-        adj = record['adj']            # (28, 28) uint8
+        features = record['features'].copy()  # (28, 8) float32
+        adj = record['adj']                   # (28, 28) uint8
+        fn2 = record['fn2']                   # (104,) float32
         eval_val = float(record['eval'])
         winner_val = float(record['winner'])
         static_val = float(record['static_eval'])
@@ -109,36 +121,53 @@ class LazyBinaryGraphDataset(Dataset):
             # Symmetrically swap White (0..13) and Black (14..27) tokens
             features = features[PERM]
             adj = adj[PERM][:, PERM]
+            # Symmetrically swap White (0..51) and Black (52..103) FN2 features
+            fn2_swapped = np.empty_like(fn2)
+            fn2_swapped[:FN_DIM] = fn2[FN_DIM:]
+            fn2_swapped[FN_DIM:] = fn2[:FN_DIM]
+            fn2 = fn2_swapped
             eval_val = -eval_val
             winner_val = 1.0 - winner_val
             static_val = -static_val
 
+        # Spatial reflections on centered hex coordinates (feat 1: x_centered, feat 2: y_centered)
+        if flip_x:
+            features[:, 1] = -features[:, 1]
+        if flip_y:
+            features[:, 2] = -features[:, 2]
+
         return (
-            torch.from_numpy(features.copy()),
+            torch.from_numpy(features),
             torch.from_numpy(adj.copy()),
+            torch.from_numpy(fn2.copy()),
             torch.tensor(eval_val, dtype=torch.float32),
             torch.tensor(winner_val, dtype=torch.float32),
             torch.tensor(static_val, dtype=torch.float32),
             torch.tensor(weight_val, dtype=torch.float32),
         )
 
+NUM_EDGE_CASES = 3  # 0: no edge, 1: flat edge, 2: vertical edge
+ADJ_TO_EDGE_CASE = [0, 1, 1, 1, 1, 1, 1, 2, 2, 0]
+
 # ---------------------------------------------------------
 # Graph Multi-Head Attention (CPU-optimized, no exponentials)
 # ---------------------------------------------------------
 class GraphMultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_tokens=NUM_TOKENS, num_types=NUM_PIECE_TYPES, n_heads=2, num_edge_types=10, use_relu_attn=True, sparse_attention=False, per_piece_type_weights=True):
+    def __init__(self, d_model, num_tokens=NUM_TOKENS, num_types=NUM_PIECE_TYPES, n_heads=2, num_edge_cases=NUM_EDGE_CASES, use_relu_attn=True, sparse_attention=False, per_piece_type_weights=True):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         self.d_model = d_model
         self.num_tokens = num_tokens
         self.num_types = num_types
         self.n_heads = n_heads
+        self.num_edge_cases = num_edge_cases
         self.d_k = d_model // n_heads
         self.use_relu_attn = use_relu_attn
         self.sparse_attention = sparse_attention
         self.per_piece_type_weights = per_piece_type_weights
 
         self.register_buffer("token_to_type", torch.tensor(TOKEN_TO_PIECE_TYPE, dtype=torch.long), persistent=False)
+        self.register_buffer("adj_map", torch.tensor(ADJ_TO_EDGE_CASE, dtype=torch.long), persistent=False)
 
         if per_piece_type_weights:
             # 16 piece types have dedicated parameter matrices
@@ -155,8 +184,8 @@ class GraphMultiHeadAttention(nn.Module):
             self.W_v = nn.Linear(d_model, d_model, bias=False)
             self.W_o = nn.Linear(d_model, d_model, bias=True)
 
-        # Edge bias for each edge type and attention head
-        self.edge_bias = nn.Parameter(torch.zeros(num_edge_types, n_heads))
+        # Pairwise piece-type edge bias: [piece type 1][piece type 2][3 edge cases][n_heads]
+        self.edge_bias = nn.Parameter(torch.zeros(num_types, num_types, num_edge_cases, n_heads))
         nn.init.normal_(self.edge_bias, std=0.02)
 
     def forward(self, h, adj, on_board_mask=None):
@@ -178,8 +207,18 @@ class GraphMultiHeadAttention(nn.Module):
         # Scaled dot-product logits: (B, H, N, N)
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.d_k ** 0.5)
 
-        # Add edge bias: adj is (B, N, N) -> lookup edge_bias -> (B, N, N, H) -> (B, H, N, N)
-        e_bias = self.edge_bias[adj].permute(0, 3, 1, 2)
+        # Map adj (0..9) to 3 cases (0: no edge, 1: flat edge, 2: vertical edge)
+        adj_case = self.adj_map[adj.long()]  # (B, N, N)
+
+        # Pairwise piece-type lookup for all 28 tokens: (N, N, 3, n_heads)
+        t_i = self.token_to_type.unsqueeze(1)  # (N, 1)
+        t_j = self.token_to_type.unsqueeze(0)  # (1, N)
+        eb_static = self.edge_bias[t_i, t_j]   # (N, N, 3, n_heads)
+
+        # Gather per-pair edge bias for batch: (B, N, N, n_heads) -> (B, n_heads, N, N)
+        tok_i = torch.arange(N, device=h.device).unsqueeze(1)
+        tok_j = torch.arange(N, device=h.device).unsqueeze(0)
+        e_bias = eb_static[tok_i, tok_j, adj_case].permute(0, 3, 1, 2)
         scores = scores + e_bias
 
         pair_mask = None
@@ -188,8 +227,8 @@ class GraphMultiHeadAttention(nn.Module):
             pair_mask = on_board_mask.unsqueeze(1) * on_board_mask.transpose(1, 2).unsqueeze(1)
 
         if self.sparse_attention:
-            # Mask out pairs with no edge (adj == 0)
-            mask = (adj == 0).unsqueeze(1)  # (B, 1, N, N)
+            # Mask out pairs with no edge (adj_case == 0)
+            mask = (adj_case == 0).unsqueeze(1)  # (B, 1, N, N)
             if self.use_relu_attn:
                 scores = scores.masked_fill(mask, 0.0)
             else:
@@ -302,8 +341,9 @@ class GraphTransformerEval(nn.Module):
         n_heads=2,
         num_layers=2,
         d_ff=32,
+        d_fn2_proj=16,
         mlp_dims=[32, 16, 8],
-        pool_type="flatten",
+        pool_type="queen_centric",
         num_pool_queries=2,
         use_relu_attn=True,
         sparse_attention=False,
@@ -318,6 +358,7 @@ class GraphTransformerEval(nn.Module):
         self.num_tokens = num_tokens
         self.num_types = num_types
         self.d_model = d_model
+        self.d_fn2_proj = d_fn2_proj
         self.zero_in_hand = zero_in_hand
         self.clip = clip
         self.pool_type = pool_type
@@ -365,16 +406,31 @@ class GraphTransformerEval(nn.Module):
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}")
 
+        self.in_dim_trans = in_dim
+
+        # FN2 handcrafted features linear projection
+        self.fn2_proj = nn.Linear(FN2_DIM, d_fn2_proj)
+
+        # Auxiliary Linear Regression heads (+ tanh * clip) before concat
+        # 1. From Graph Transformer representation
+        self.trans_aux_linear = nn.Linear(in_dim, 1)
+        # 2. From FN2 tabular features
+        self.fn2_aux_linear = nn.Linear(FN2_DIM, 1)
+
+        # Concat dimension for Head MLP
+        in_dim_fused = in_dim + d_fn2_proj
+
         head_layers = []
+        curr_dim = in_dim_fused
         for out_dim in mlp_dims:
-            head_layers.append(nn.Linear(in_dim, out_dim))
+            head_layers.append(nn.Linear(curr_dim, out_dim))
             head_layers.append(nn.ReLU())
-            in_dim = out_dim
-        head_layers.append(nn.Linear(in_dim, 2))  # [eval, winner]
+            curr_dim = out_dim
+        head_layers.append(nn.Linear(curr_dim, 2))  # [eval, winner]
         self.head = nn.Sequential(*head_layers)
 
-    def forward(self, x, adj):
-        # x: (B, 28, 8), adj: (B, 28, 28)
+    def forward(self, x, adj, fn2=None, return_aux=False):
+        # x: (B, 28, 8), adj: (B, 28, 28), fn2: (B, 104)
         B, N, _ = x.shape
         adj = adj.long()
 
@@ -418,11 +474,27 @@ class GraphTransformerEval(nn.Module):
         else:
             pooled = h.reshape(B, -1)
 
+        # Process FN2 features
+        if fn2 is not None:
+            h_fn2 = F.relu(self.fn2_proj(fn2))
+            aux_eval_fn2 = torch.tanh(self.fn2_aux_linear(fn2)[:, 0]) * self.clip
+        else:
+            h_fn2 = torch.zeros(B, self.d_fn2_proj, device=x.device)
+            aux_eval_fn2 = torch.zeros(B, device=x.device)
+
+        # Auxiliary linear regression from Graph Transformer pooled representation
+        aux_eval_trans = torch.tanh(self.trans_aux_linear(pooled)[:, 0]) * self.clip
+
+        # Concat transformer features and FN2 features
+        fused = torch.cat([pooled, h_fn2], dim=-1)
+
         # Output head
-        out = self.head(pooled)
+        out = self.head(fused)
         eval_pred = F.softsign(out[:, 0]) * 1.5 * self.clip
         winner_pred = torch.sigmoid(out[:, 1])
 
+        if return_aux:
+            return eval_pred, winner_pred, aux_eval_trans, aux_eval_fn2
         return eval_pred, winner_pred
 
 # ---------------------------------------------------------
@@ -503,8 +575,10 @@ def export_rust_weights(model, args, out_path="logs/eval_gt.rs", epoch=None, tra
         f.write(f"pub const GT_D_K: usize = {args.d_model // args.n_heads};\n")
         f.write(f"pub const GT_NUM_LAYERS: usize = {args.num_layers};\n")
         f.write(f"pub const GT_D_FF: usize = {args.d_ff};\n")
+        f.write(f"pub const GT_D_FN2_PROJ: usize = {getattr(args, 'd_fn2_proj', 16)};\n")
         f.write(f"pub const GT_ZERO_IN_HAND: bool = {'true' if args.zero_in_hand else 'false'};\n")
-        f.write(f"pub const GT_SPARSE_ATTN: bool = {'true' if args.sparse_attention else 'false'};\n\n")
+        f.write(f"pub const GT_SPARSE_ATTN: bool = {'true' if args.sparse_attention else 'false'};\n")
+        f.write(f"pub const GT_POOL_TYPE: &str = \"{args.pool_type}\";\n\n")
 
         # 1. Piece Projections
         if model.per_piece_type_weights:
@@ -539,7 +613,7 @@ def export_rust_weights(model, args, out_path="logs/eval_gt.rs", epoch=None, tra
                 wv = layer.attn.W_v[TOKEN_TO_PIECE_TYPE].detach().cpu().numpy()
                 wo = layer.attn.W_o[TOKEN_TO_PIECE_TYPE].detach().cpu().numpy()
                 bo = layer.attn.b_o[TOKEN_TO_PIECE_TYPE].detach().cpu().numpy()  # (NUM_TOKENS, d_model)
-                eb = layer.attn.edge_bias.detach().cpu().numpy()  # (10, n_heads)
+                eb = layer.attn.edge_bias[TOKEN_TO_PIECE_TYPE][:, TOKEN_TO_PIECE_TYPE].detach().cpu().numpy()  # (NUM_TOKENS, NUM_TOKENS, NUM_EDGE_CASES, n_heads)
 
                 for name, arr in [("WQ", wq), ("WK", wk), ("WV", wv), ("WO", wo)]:
                     f.write(f"pub const GT_{prefix}{name}: [[[f32; {args.d_model}]; {args.d_model}]; {NUM_TOKENS}] = [\n")
@@ -555,9 +629,15 @@ def export_rust_weights(model, args, out_path="logs/eval_gt.rs", epoch=None, tra
                     f.write("\t[" + ", ".join(f"{float(v):.8e}f32" for v in row) + "],\n")
                 f.write("];\n\n")
 
-                f.write(f"pub const GT_{prefix}EDGE_BIAS: [[f32; {args.n_heads}]; {NUM_EDGE_TYPES}] = [\n")
-                for row in eb:
-                    f.write("\t[" + ", ".join(f"{float(v):.8e}f32" for v in row) + "],\n")
+                f.write(f"pub const GT_{prefix}EDGE_BIAS: [[[[f32; {args.n_heads}]; {NUM_EDGE_CASES}]; {NUM_TOKENS}]; {NUM_TOKENS}] = [\n")
+                for i_tok in range(NUM_TOKENS):
+                    f.write("\t[\n")
+                    for j_tok in range(NUM_TOKENS):
+                        f.write("\t\t[\n")
+                        for case in range(NUM_EDGE_CASES):
+                            f.write("\t\t\t[" + ", ".join(f"{float(v):.8e}f32" for v in eb[i_tok, j_tok, case]) + "],\n")
+                        f.write("\t\t],\n")
+                    f.write("\t],\n")
                 f.write("];\n\n")
 
                 # LayerNorm 1
@@ -668,7 +748,30 @@ def export_rust_weights(model, args, out_path="logs/eval_gt.rs", epoch=None, tra
                 f.write(f"pub const GT_{prefix}NORM2_G: [f32; {args.d_model}] = [" + ", ".join(f"{float(v):.8e}f32" for v in gamma2) + "];\n")
                 f.write(f"pub const GT_{prefix}NORM2_B: [f32; {args.d_model}] = [" + ", ".join(f"{float(v):.8e}f32" for v in beta2) + "];\n\n")
 
-        # 3. Readout Head MLP
+        # 3. FN2 Handcrafted Feature Projection
+        w_fn2 = model.fn2_proj.weight.detach().cpu().numpy().T  # (FN2_DIM, d_fn2_proj)
+        b_fn2 = model.fn2_proj.bias.detach().cpu().numpy()
+        d_fn2 = w_fn2.shape[1]
+
+        f.write(f"pub const GT_FN2_PROJ_W: [[f32; {d_fn2}]; {FN2_DIM}] = [\n")
+        for row in w_fn2:
+            f.write("\t[" + ", ".join(f"{float(v):.8e}f32" for v in row) + "],\n")
+        f.write("];\n\n")
+
+        f.write(f"pub const GT_FN2_PROJ_B: [f32; {d_fn2}] = [" + ", ".join(f"{float(v):.8e}f32" for v in b_fn2) + "];\n\n")
+
+        # 4. Auxiliary Linear Regression Heads
+        w_aux_trans = model.trans_aux_linear.weight.detach().cpu().numpy().T  # (in_dim_trans, 1)
+        b_aux_trans = float(model.trans_aux_linear.bias[0].item())
+        f.write(f"pub const GT_TRANS_AUX_W: [f32; {model.in_dim_trans}] = [" + ", ".join(f"{float(v[0]):.8e}f32" for v in w_aux_trans) + "];\n")
+        f.write(f"pub const GT_TRANS_AUX_B: f32 = {b_aux_trans:.8e}f32;\n\n")
+
+        w_aux_fn2 = model.fn2_aux_linear.weight.detach().cpu().numpy().T  # (FN2_DIM, 1)
+        b_aux_fn2 = float(model.fn2_aux_linear.bias[0].item())
+        f.write(f"pub const GT_FN2_AUX_W: [f32; {FN2_DIM}] = [" + ", ".join(f"{float(v[0]):.8e}f32" for v in w_aux_fn2) + "];\n")
+        f.write(f"pub const GT_FN2_AUX_B: f32 = {b_aux_fn2:.8e}f32;\n\n")
+
+        # 5. Readout Head MLP (taking fused transformer + FN2 features)
         head_linear_idx = 1
         for mod in model.head:
             if isinstance(mod, nn.Linear):
@@ -706,6 +809,7 @@ def count_transformer_flops(args, avg_on_board=12.0):
     d_k = d_model // args.n_heads
     d_ff = args.d_ff
     num_layers = args.num_layers
+    d_fn2_proj = getattr(args, "d_fn2_proj", 16)
     N = NUM_TOKENS  # 28
 
     # 1. Layer 0 Initial Projections W_proj (8 -> d_model)
@@ -734,6 +838,9 @@ def count_transformer_flops(args, avg_on_board=12.0):
     # Subsequent Layers Q, K, V Projections (Layers 1..num_layers-1)
     subsequent_qkv_flops = (num_layers - 1) * (N * qkv_flops_per_tok)
 
+    # FN2 Projection FLOPs
+    fn2_proj_flops = 2 * FN2_DIM * d_fn2_proj + d_fn2_proj
+
     # Readout Head MLP FLOPs
     if args.pool_type == "flatten":
         in_dim = N * d_model
@@ -745,7 +852,7 @@ def count_transformer_flops(args, avg_on_board=12.0):
         in_dim = d_model
 
     head_flops = 0
-    curr_dim = in_dim
+    curr_dim = in_dim + d_fn2_proj
     for out_dim in args.mlp_dims:
         head_flops += 2 * curr_dim * out_dim + out_dim  # Linear + ReLU
         curr_dim = out_dim
@@ -757,6 +864,7 @@ def count_transformer_flops(args, avg_on_board=12.0):
         + N * qkv_flops_per_tok
         + (num_layers * per_layer_flops)
         + subsequent_qkv_flops
+        + fn2_proj_flops
         + head_flops
     )
 
@@ -766,6 +874,7 @@ def count_transformer_flops(args, avg_on_board=12.0):
         + avg_on_board * qkv_flops_per_tok
         + (num_layers * per_layer_flops)
         + subsequent_qkv_flops
+        + fn2_proj_flops
         + head_flops
     )
 
@@ -776,6 +885,7 @@ def count_transformer_flops(args, avg_on_board=12.0):
         + dirty_tokens * qkv_flops_per_tok
         + (num_layers * per_layer_flops)
         + subsequent_qkv_flops
+        + fn2_proj_flops
         + head_flops
     )
 
@@ -800,6 +910,14 @@ def load_model_weights_from_ckpt(model, ckpt_path, device):
                     avg_tensor[t] = v[idxs].mean(dim=0)
                 new_state[k] = avg_tensor
                 print(f"  Adapted {k:30s}: [28, ...] -> {list(new_shape)} (averaged)")
+            elif k.endswith("edge_bias") and v.ndim == 2 and target_shape == (16, 16, 3, v.shape[-1]):
+                # Adapt 1D edge bias [10, n_heads] to pairwise [16, 16, 3, n_heads]
+                c0 = v[0]
+                c1 = v[1:7].mean(dim=0) if v.shape[0] >= 7 else v[0]
+                c2 = v[7:9].mean(dim=0) if v.shape[0] >= 9 else v[0]
+                case_bias = torch.stack([c0, c1, c2], dim=0)  # (3, n_heads)
+                new_state[k] = case_bias.unsqueeze(0).unsqueeze(0).expand(16, 16, 3, v.shape[-1]).clone()
+                print(f"  Adapted {k:30s}: {list(v.shape)} -> {list(target_shape)} (expanded across piece types)")
             else:
                 new_state[k] = v
         else:
@@ -833,12 +951,13 @@ def main():
     p.add_argument("--clip", type=float, default=6000.0)
 
     # Architecture Hyperparameters
-    p.add_argument("--d-model", type=int, default=16, help="Transformer hidden state size")
+    p.add_argument("--d-model", type=int, default=10, help="Transformer hidden state size")
     p.add_argument("--n-heads", type=int, default=2, help="Number of attention heads")
     p.add_argument("--num-layers", type=int, default=2, help="Number of Graph Transformer blocks (<= 3)")
-    p.add_argument("--d-ff", type=int, default=24, help="Feed-forward intermediate size")
+    p.add_argument("--d-ff", type=int, default=12, help="Feed-forward intermediate size")
+    p.add_argument("--d-fn2-proj", type=int, default=28, help="Intermediate dimension for FN2 handcrafted features projection")
     p.add_argument("--mlp-dims", type=int, nargs="+", default=[32, 16, 8], help="Output MLP hidden dimensions")
-    p.add_argument("--pool-type", choices=["flatten", "diff", "queen_centric", "attention_pool", "cls"], default="flatten", help="Token pooling strategy")
+    p.add_argument("--pool-type", choices=["flatten", "diff", "queen_centric", "attention_pool", "cls"], default="queen_centric", help="Token pooling strategy")
     p.add_argument("--num-pool-queries", type=int, default=2, help="Number of queries for attention_pool")
     p.add_argument("--per-token-weights", action="store_true", default=True, help="Each piece token has its own dedicated matrices (default)")
     p.add_argument("--share-token-weights", action="store_true", help="Share attention and FFN weights across all tokens")
@@ -850,10 +969,11 @@ def main():
 
     # Training Parameters
     p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=1.0e-3)
     p.add_argument("--batch", type=int, default=2048)
-    p.add_argument("--num-workers", type=int, default=4, help="Number of DataLoader worker processes for streaming")
+    p.add_argument("--num-workers", type=int, default=2, help="Number of DataLoader worker processes for streaming")
     p.add_argument("--lambda-w", type=float, default=2e-3, help="Weight for winner BCE loss")
+    p.add_argument("--lambda-aux", type=float, default=0.05, help="Weight for auxiliary linear regression losses (trans & fn2)")
     p.add_argument("--l2", type=float, default=3e-6, help="L2 regularization")
     p.add_argument("--no-scheduler", action="store_true", help="Disable learning rate cosine annealing scheduler (useful for short training runs)")
     p.add_argument("--no-augment", action="store_true", help="Disable symmetric data augmentation")
@@ -932,16 +1052,18 @@ def main():
     model = GraphTransformerEval(
         d_in=TOKEN_FEAT_DIM,
         num_tokens=NUM_TOKENS,
+        num_types=NUM_PIECE_TYPES,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_layers=args.num_layers,
         d_ff=args.d_ff,
+        d_fn2_proj=args.d_fn2_proj,
         mlp_dims=args.mlp_dims,
         pool_type=args.pool_type,
         num_pool_queries=args.num_pool_queries,
         use_relu_attn=args.use_relu_attn,
         sparse_attention=args.sparse_attention,
-        per_token_weights=args.per_token_weights,
+        per_piece_type_weights=args.per_token_weights,
         zero_in_hand=args.zero_in_hand,
         clip=args.clip,
     ).to(device)
@@ -956,10 +1078,12 @@ def main():
     print(f"  Hidden State Dimension (d_model): {args.d_model}")
     print(f"  Attention Heads: {args.n_heads}")
     print(f"  FFN Intermediate Dimension: {args.d_ff}")
+    print(f"  FN2 Projection Dimension: {args.d_fn2_proj}")
     print(f"  Token Pooling: {args.pool_type}")
     print(f"  Attention Type: {'ReLU Attention (No Exponentials)' if args.use_relu_attn else 'Softmax Attention'}")
     print(f"  Sparse Graph Attention: {args.sparse_attention}")
     print(f"  Zero-in-hand Optimization: {args.zero_in_hand}")
+    print(f"  Auxiliary Linear Heads: Graph Trans Aux + FN2 Aux (lambda_aux={args.lambda_aux})")
     print(f"  Total Parameters: {total_params:,}")
     print(f"  Average pieces on board: {avg_on_board:.1f} / {NUM_TOKENS} tokens ({(1.0 - avg_on_board / NUM_TOKENS)*100:.1f}% in-hand zeros)")
     print(f"  Max FLOPs (Uncached, 100% active tokens): {max_flops:,.0f}")
@@ -1015,37 +1139,42 @@ def main():
     if args.eval_only:
         print("\n-- Evaluating Model on Test Set (--eval-only) --")
         model.eval()
-        all_preds, all_winner, all_y, all_wb, all_static = [], [], [], [], []
+        all_preds, all_winner, all_aux_t, all_aux_f, all_y, all_wb, all_static = [], [], [], [], [], [], []
         with torch.no_grad():
-            for xb, ab, yb, wb, sb, _ in test_loader:
-                xb, ab = xb.to(device), ab.to(device)
-                pred_eval, pred_winner = model(xb, ab)
+            for xb, ab, fb, yb, wb, sb, _ in test_loader:
+                xb, ab, fb = xb.to(device), ab.to(device), fb.to(device)
+                pred_eval, pred_winner, aux_t, aux_f = model(xb, ab, fb, return_aux=True)
                 all_preds.append(pred_eval.cpu().numpy())
                 all_winner.append(pred_winner.cpu().numpy())
+                all_aux_t.append(aux_t.cpu().numpy())
+                all_aux_f.append(aux_f.cpu().numpy())
                 all_y.append(yb.numpy())
                 all_wb.append(wb.numpy())
                 all_static.append(sb.numpy())
 
         y_test_pred = np.concatenate(all_preds)
         winner_test_pred = np.concatenate(all_winner)
+        aux_t_test_pred = np.concatenate(all_aux_t)
+        aux_f_test_pred = np.concatenate(all_aux_f)
         y_test_true = np.concatenate(all_y)
         winner_test_true = np.concatenate(all_wb)
         y_test_static = np.concatenate(all_static)
 
         gt_metrics = metrics(y_test_true, y_test_pred)
+        aux_t_metrics = metrics(y_test_true, aux_t_test_pred)
+        aux_f_metrics = metrics(y_test_true, aux_f_test_pred)
         win_mae = float(np.mean(np.abs(winner_test_pred - winner_test_true)))
+
         print(f"\nModel on Test Set ({len(y_test_true):,} samples):")
-        print(f"  Evaluation RMSE: {gt_metrics['rmse']:.2f}")
-        print(f"  Evaluation MAE:  {gt_metrics['mae']:.2f}")
-        print(f"  Evaluation R2:   {gt_metrics['r2']:.4f}")
-        print(f"  Winner MAE:      {win_mae:.4f}")
+        print(f"  Fused Evaluation RMSE: {gt_metrics['rmse']:.2f}  MAE: {gt_metrics['mae']:.2f}  R2: {gt_metrics['r2']:.4f}")
+        print(f"  Trans Aux Linear RMSE: {aux_t_metrics['rmse']:.2f}  MAE: {aux_t_metrics['mae']:.2f}  R2: {aux_t_metrics['r2']:.4f}")
+        print(f"  FN2 Aux Linear RMSE:   {aux_f_metrics['rmse']:.2f}  MAE: {aux_f_metrics['mae']:.2f}  R2: {aux_f_metrics['r2']:.4f}")
+        print(f"  Winner MAE:            {win_mae:.4f}")
 
         if (y_test_static != 0).any():
             static_metrics = metrics(y_test_true, y_test_static)
             print(f"\nStatic_eval baseline on same Test Set:")
-            print(f"  RMSE: {static_metrics['rmse']:.2f}")
-            print(f"  MAE:  {static_metrics['mae']:.2f}")
-            print(f"  R2:   {static_metrics['r2']:.4f}")
+            print(f"  RMSE: {static_metrics['rmse']:.2f}  MAE: {static_metrics['mae']:.2f}  R2: {static_metrics['r2']:.4f}")
 
         if args.export_rust:
             export_rust_weights(model, args, args.export_rust, epoch=start_epoch, val_metrics=gt_metrics)
@@ -1062,33 +1191,51 @@ def main():
         model.train()
         running_eval_loss = 0.0
         running_eval_rmse = 0.0
+        running_aux_t_rmse = 0.0
+        running_aux_f_rmse = 0.0
         running_winner_loss = 0.0
         running_winner_mae = 0.0
         running_reg_loss = 0.0
         running_total_loss = 0.0
         total = 0
 
-        for xb, ab, yb, wb, _, wtb in train_loader:
-            xb, ab, yb, wb, wtb = xb.to(device), ab.to(device), yb.to(device), wb.to(device), wtb.to(device)
+        for xb, ab, fb, yb, wb, _, wtb in train_loader:
+            xb, ab, fb, yb, wb, wtb = (
+                xb.to(device),
+                ab.to(device),
+                fb.to(device),
+                yb.to(device),
+                wb.to(device),
+                wtb.to(device),
+            )
             optimizer.zero_grad()
 
-            pred_eval, pred_winner = model(xb, ab)
+            pred_eval, pred_winner, aux_t, aux_f = model(xb, ab, fb, return_aux=True)
 
-            # Weighted losses
+            # Main weighted losses
             loss_e = loss_fn_eval(pred_eval / args.clip, yb / args.clip)
             loss_e = (loss_e * wtb).mean()
 
             loss_w = loss_fn_winner(pred_winner, wb)
             loss_w = (loss_w * wtb).mean() * args.lambda_w
 
+            # Auxiliary linear regression losses
+            loss_aux_t = loss_fn_eval(aux_t / args.clip, yb / args.clip)
+            loss_aux_t = (loss_aux_t * wtb).mean() * args.lambda_aux
+
+            loss_aux_f = loss_fn_eval(aux_f / args.clip, yb / args.clip)
+            loss_aux_f = (loss_aux_f * wtb).mean() * args.lambda_aux
+
             l2_reg = args.l2 * sum(p.pow(2).sum() for p in model.parameters())
-            loss = loss_e + loss_w + l2_reg
+            loss = loss_e + loss_w + loss_aux_t + loss_aux_f + l2_reg
             loss.backward()
             optimizer.step()
 
             bs = xb.size(0)
             running_eval_loss += loss_e.item() * bs
             running_eval_rmse += ((pred_eval - yb) ** 2).sum().item()
+            running_aux_t_rmse += ((aux_t - yb) ** 2).sum().item()
+            running_aux_f_rmse += ((aux_f - yb) ** 2).sum().item()
             running_winner_loss += loss_w.item() * bs
             running_winner_mae += (pred_winner - wb).abs().sum().item()
             running_reg_loss += l2_reg.item() * bs
@@ -1097,6 +1244,8 @@ def main():
 
         train_eval_loss = running_eval_loss / total
         train_eval_rmse = (running_eval_rmse / total) ** 0.5
+        train_aux_t_rmse = (running_aux_t_rmse / total) ** 0.5
+        train_aux_f_rmse = (running_aux_f_rmse / total) ** 0.5
         train_winner_loss = running_winner_loss / total
         train_winner_mae = running_winner_mae / total
         train_reg_loss = running_reg_loss / total
@@ -1106,14 +1255,22 @@ def main():
         model.eval()
         val_eval_loss = 0.0
         val_eval_rmse = 0.0
+        val_aux_t_rmse = 0.0
+        val_aux_f_rmse = 0.0
         val_winner_loss = 0.0
         val_winner_mae = 0.0
         val_total = 0
 
         with torch.no_grad():
-            for xb, ab, yb, wb, _, _ in test_loader:
-                xb, ab, yb, wb = xb.to(device), ab.to(device), yb.to(device), wb.to(device)
-                pred_eval, pred_winner = model(xb, ab)
+            for xb, ab, fb, yb, wb, _, _ in test_loader:
+                xb, ab, fb, yb, wb = (
+                    xb.to(device),
+                    ab.to(device),
+                    fb.to(device),
+                    yb.to(device),
+                    wb.to(device),
+                )
+                pred_eval, pred_winner, aux_t, aux_f = model(xb, ab, fb, return_aux=True)
 
                 loss_e = ((pred_eval / args.clip - yb / args.clip) ** 2).mean()
                 loss_w = F.binary_cross_entropy(pred_winner, wb) * args.lambda_w
@@ -1121,12 +1278,16 @@ def main():
                 bs = xb.size(0)
                 val_eval_loss += loss_e.item() * bs
                 val_eval_rmse += ((pred_eval - yb) ** 2).sum().item()
+                val_aux_t_rmse += ((aux_t - yb) ** 2).sum().item()
+                val_aux_f_rmse += ((aux_f - yb) ** 2).sum().item()
                 val_winner_loss += loss_w.item() * bs
                 val_winner_mae += (pred_winner - wb).abs().sum().item()
                 val_total += bs
 
         val_eval_loss /= val_total
         val_eval_rmse = (val_eval_rmse / val_total) ** 0.5
+        val_aux_t_rmse = (val_aux_t_rmse / val_total) ** 0.5
+        val_aux_f_rmse = (val_aux_f_rmse / val_total) ** 0.5
         val_winner_loss /= val_total
         val_winner_mae /= val_total
         val_reg_loss = (args.l2 * sum(p.pow(2).sum() for p in model.parameters())).item()
@@ -1159,6 +1320,14 @@ def main():
         }
         torch.save(latest_state, "logs/checkpoint_latest.pth")
 
+        star = "*" if is_best else ""
+        print(
+            f"Epoch {epoch+1:3d}/{args.epochs} lr={cur_lr:.2e} | "
+            f"TRAIN eval={train_eval_rmse:6.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
+            f"TEST  eval={val_eval_rmse:6.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f} | "
+            f"AUX {val_aux_t_rmse:6.1f}, {val_aux_f_rmse:6.1f} {star}"
+        )
+
         # Save best model and export Rust weights immediately if improved
         if is_best:
             torch.save(latest_state, "logs/best_gt_eval.pth")
@@ -1178,12 +1347,6 @@ def main():
         plt.grid(True)
         plt.savefig("logs/training_loss_gt.png", dpi=150)
         plt.close()
-
-        print(
-            f"Epoch {epoch+1:3d}/{args.epochs} lr={cur_lr:.2e} | "
-            f"TRAIN eval={train_eval_rmse:6.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
-            f"TEST  eval={val_eval_rmse:6.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}"
-        )
 
     # Save best checkpoint
     if best_state is not None:
@@ -1206,33 +1369,38 @@ def main():
 
     # Final Evaluation on Test Set
     model.eval()
-    all_preds = []
+    all_preds, all_aux_t, all_aux_f = [], [], []
     all_y = []
     all_static = []
     with torch.no_grad():
-        for xb, ab, yb, _, sb, _ in test_loader:
-            xb, ab = xb.to(device), ab.to(device)
-            pred_eval, _ = model(xb, ab)
+        for xb, ab, fb, yb, _, sb, _ in test_loader:
+            xb, ab, fb = xb.to(device), ab.to(device), fb.to(device)
+            pred_eval, _, aux_t, aux_f = model(xb, ab, fb, return_aux=True)
             all_preds.append(pred_eval.cpu().numpy())
+            all_aux_t.append(aux_t.cpu().numpy())
+            all_aux_f.append(aux_f.cpu().numpy())
             all_y.append(yb.numpy())
             all_static.append(sb.numpy())
 
     y_test_pred = np.concatenate(all_preds)
+    y_test_aux_t = np.concatenate(all_aux_t)
+    y_test_aux_f = np.concatenate(all_aux_f)
     y_test_true = np.concatenate(all_y)
     y_test_static = np.concatenate(all_static)
 
     gt_metrics = metrics(y_test_true, y_test_pred)
+    aux_t_m = metrics(y_test_true, y_test_aux_t)
+    aux_f_m = metrics(y_test_true, y_test_aux_f)
+
     print(f"\nGraph Transformer on Test Set (Best Epoch {best_epoch}):")
-    print(f"  RMSE: {gt_metrics['rmse']:.4f}")
-    print(f"  MAE:  {gt_metrics['mae']:.4f}")
-    print(f"  R2:   {gt_metrics['r2']:.4f}")
+    print(f"  Fused Evaluation: RMSE: {gt_metrics['rmse']:.2f}  MAE: {gt_metrics['mae']:.2f}  R2: {gt_metrics['r2']:.4f}")
+    print(f"  Trans Aux Linear: RMSE: {aux_t_m['rmse']:.2f}  MAE: {aux_t_m['mae']:.2f}  R2: {aux_t_m['r2']:.4f}")
+    print(f"  FN2 Aux Linear:   RMSE: {aux_f_m['rmse']:.2f}  MAE: {aux_f_m['mae']:.2f}  R2: {aux_f_m['r2']:.4f}")
 
     if (y_test_static != 0).any():
         static_metrics = metrics(y_test_true, y_test_static)
         print(f"\nStatic_eval baseline on same Test Set:")
-        print(f"  RMSE: {static_metrics['rmse']:.4f}")
-        print(f"  MAE:  {static_metrics['mae']:.4f}")
-        print(f"  R2:   {static_metrics['r2']:.4f}")
+        print(f"  RMSE: {static_metrics['rmse']:.2f}  MAE: {static_metrics['mae']:.2f}  R2: {static_metrics['r2']:.4f}")
 
     # Export Rust Weights
     if args.export_rust:

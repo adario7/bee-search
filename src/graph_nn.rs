@@ -1,4 +1,5 @@
 use crate::board::{Action, ActionList, Board};
+use crate::movegen::OtherMoves;
 use crate::piece::Color;
 use crate::tile::{adjacent, tile_to_loc, GRID_SIZE};
 use crate::piece_type::{Pct, PieceType, PCT_COUNT};
@@ -43,7 +44,23 @@ pub fn token_idx_to_piece(idx: usize) -> (Color, Pct, u8) {
     unreachable!()
 }
 
-#[derive(Clone, Debug)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeType {
+    None = 0,
+    NW = 1,
+    NE = 2,
+    E = 3,
+    SE = 4,
+    SW = 5,
+    W = 6,
+    StackUp = 7,
+    StackDown = 8,
+    SelfLoop = 9,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TokenGraph {
     /// 28 tokens x 8 features
     /// Tokens 0..13: White pieces, Tokens 14..27: Black pieces
@@ -57,7 +74,6 @@ pub struct TokenGraph {
     /// [7]: is_buried (1.0 if covered in stack, 0.0 otherwise)
     pub features: [[f32; TOKEN_FEAT_DIM]; NUM_TOKENS],
     /// 28 x 28 adjacency matrix
-    /// 0: None, 1..6: NW, NE, E, SE, SW, W, 7: Stack-Up, 8: Stack-Down, 9: Self
     pub adj: [[u8; NUM_TOKENS]; NUM_TOKENS],
 }
 
@@ -65,7 +81,7 @@ impl TokenGraph {
     pub fn new() -> Self {
         Self {
             features: [[0.0; TOKEN_FEAT_DIM]; NUM_TOKENS],
-            adj: [[0; NUM_TOKENS]; NUM_TOKENS],
+            adj: [[EdgeType::None as u8; NUM_TOKENS]; NUM_TOKENS],
         }
     }
 }
@@ -85,7 +101,7 @@ impl GameGraph {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct PlacedPieceInfo {
     token_idx: usize,
     tile: u16,
@@ -100,12 +116,17 @@ impl Board {
     pub fn get_token_graph(&mut self) -> TokenGraph {
         let my_moves_by_tile = self.generate_movements_by_tile();
         let my_place_count = self.generate_placements_n();
-        self.get_token_graph_with_moves(my_moves_by_tile, my_place_count)
+        let other = self.other_moves();
+        self.get_token_graph_with_moves(my_moves_by_tile, my_place_count, &other)
     }
 
-    /// Optimized version of `get_token_graph` that directly utilizes `my_moves` already computed by search,
+    /// Optimized version of `get_token_graph` that directly utilizes `my_moves` and `other` already computed,
     /// extracting `my_moves_by_tile` in O(|moves|) without regenerating.
-    pub fn get_token_graph_fast(&mut self, my_moves: &ActionList) -> TokenGraph {
+    pub fn get_token_graph_fast(
+        &mut self,
+        my_moves: &ActionList,
+        other: &OtherMoves,
+    ) -> TokenGraph {
         let mut my_moves_by_tile = [0u16; GRID_SIZE];
         let mut my_place_count = 0usize;
 
@@ -121,13 +142,14 @@ impl Board {
             }
         }
 
-        self.get_token_graph_with_moves(my_moves_by_tile, my_place_count)
+        self.get_token_graph_with_moves(my_moves_by_tile, my_place_count, other)
     }
 
-    pub fn get_token_graph_with_moves(
+    fn get_token_graph_with_moves(
         &mut self,
         my_moves_by_tile: [u16; GRID_SIZE],
         my_place_count: usize,
+        other: &OtherMoves,
     ) -> TokenGraph {
         let mut tg = TokenGraph::new();
 
@@ -143,42 +165,22 @@ impl Board {
             white_queen_required,
             black_queen_required,
         ) = match self.color() {
-            Color::White => {
-                let white_moves = my_moves_by_tile;
-                let white_place = my_place_count;
-                let white_q_req = self.queen_required();
-                self.turn_num += 1;
-                let black_moves = self.generate_movements_by_tile();
-                let black_place = self.generate_placements_n();
-                let black_q_req = self.queen_required();
-                self.turn_num -= 1;
-                (
-                    white_moves,
-                    black_moves,
-                    white_place,
-                    black_place,
-                    white_q_req,
-                    black_q_req,
-                )
-            }
-            Color::Black => {
-                let black_moves = my_moves_by_tile;
-                let black_place = my_place_count;
-                let black_q_req = self.queen_required();
-                self.turn_num += 1;
-                let white_moves = self.generate_movements_by_tile();
-                let white_place = self.generate_placements_n();
-                let white_q_req = self.queen_required();
-                self.turn_num -= 1;
-                (
-                    white_moves,
-                    black_moves,
-                    white_place,
-                    black_place,
-                    white_q_req,
-                    black_q_req,
-                )
-            }
+            Color::White => (
+                my_moves_by_tile,
+                other.moves_by_tile,
+                my_place_count,
+                other.place_count,
+                self.queen_required(),
+                other.queen_required,
+            ),
+            Color::Black => (
+                other.moves_by_tile,
+                my_moves_by_tile,
+                other.place_count,
+                my_place_count,
+                other.queen_required,
+                self.queen_required(),
+            ),
         };
 
         // 1. Scan board and underworld to find all placed pieces

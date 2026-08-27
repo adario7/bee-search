@@ -17,6 +17,7 @@ use bee_search::graph_nn::{NUM_TOKENS, TOKEN_FEAT_DIM};
 pub struct BinaryGraphRecord {
     pub features: [[f32; TOKEN_FEAT_DIM]; NUM_TOKENS],
     pub adj: [[u8; NUM_TOKENS]; NUM_TOKENS],
+    pub fn2_features: [f32; Board::FN2],
     pub eval: f32,
     pub winner: f32,
     pub static_eval: f32,
@@ -121,8 +122,8 @@ fn main() {
     let args = Args::parse();
     assert_eq!(
         std::mem::size_of::<BinaryGraphRecord>(),
-        1696,
-        "BinaryGraphRecord size must be exactly 1696 bytes"
+        2112,
+        "BinaryGraphRecord size must be exactly 2112 bytes"
     );
 
     let num_threads = if args.threads == 0 {
@@ -188,7 +189,9 @@ fn main() {
                 let entry = &entries_c[idx];
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut board = Board::parse_game_string(&entry.position).ok()?;
-                    let tg = board.get_token_graph();
+                    let moves = board.generate_moves();
+                    let other = board.other_moves();
+                    let tg = board.get_token_graph_fast(&moves, &other);
                     let is_white = board.color() == Color::White;
                     let eval_white = if is_white { entry.evaluation } else { -entry.evaluation };
                     let win_white = if is_white { entry.winner } else { 1.0 - entry.winner };
@@ -196,9 +199,25 @@ fn main() {
                     let clamped_eval = eval_white.clamp(-clip_val, clip_val);
                     let clamped_win = win_white.clamp(0.0, 1.0);
 
+                    // Compute absolute FN2 features (White: 0..FN, Black: FN..FN2)
+                    let fn2_raw = board.features_fn2_fast(&moves, &other);
+                    let mut fn2_white = [0.0f32; Board::FN2];
+                    if is_white {
+                        for i in 0..Board::FN2 {
+                            fn2_white[i] = fn2_raw[i] as f32;
+                        }
+                    } else {
+                        // Swap White and Black blocks to ensure White-first absolute perspective
+                        for i in 0..Board::FN {
+                            fn2_white[i] = fn2_raw[Board::FN + i] as f32;
+                            fn2_white[Board::FN + i] = fn2_raw[i] as f32;
+                        }
+                    }
+
                     Some(BinaryGraphRecord {
                         features: tg.features,
                         adj: tg.adj,
+                        fn2_features: fn2_white,
                         eval: clamped_eval,
                         winner: clamped_win,
                         static_eval: static_white,

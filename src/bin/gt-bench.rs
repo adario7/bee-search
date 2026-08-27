@@ -143,9 +143,10 @@ fn main() {
     println!("1. Benchmarking UNCACHED GT inference (from scratch) for K = {}...", k);
     let start_uncached = Instant::now();
     let mut dummy_uncached: Eval = 0;
+    let fn2_dummy = [0.0f32; 104];
     for i in 0..k {
         let g = &graphs[i % n];
-        dummy_uncached ^= black_box(gt_inference(black_box(&g.features), black_box(&g.adj)));
+        dummy_uncached ^= black_box(gt_inference(black_box(&g.features), black_box(&g.adj), black_box(&fn2_dummy)));
     }
     let elapsed_uncached = start_uncached.elapsed();
     let secs_uncached = elapsed_uncached.as_secs_f64();
@@ -159,7 +160,7 @@ fn main() {
     let mut dummy_cached: Eval = 0;
     for i in 0..k {
         let g = &graphs[i % n];
-        dummy_cached ^= black_box(cache.update_and_infer(black_box(&g.features), black_box(&g.adj)));
+        dummy_cached ^= black_box(cache.update_and_infer(black_box(&g.features), black_box(&g.adj), black_box(&fn2_dummy)));
     }
     let elapsed_cached = start_cached.elapsed();
     let secs_cached = elapsed_cached.as_secs_f64();

@@ -1067,6 +1067,37 @@ impl Board {
         }
         max(1,n_moves)
     }
+
+    pub fn other_moves(&mut self) -> OtherMoves {
+        self.turn_num += 1;
+        let moves_by_tile = self.generate_movements_by_tile();
+        let place_count = self.generate_placements_n();
+        let queen_required = self.queen_required();
+        self.turn_num -= 1;
+        OtherMoves {
+            moves_by_tile,
+            place_count,
+            queen_required,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OtherMoves {
+    pub moves_by_tile: [u16; GRID_SIZE],
+    pub place_count: usize,
+    pub queen_required: bool,
+}
+
+impl OtherMoves {
+    #[inline]
+    pub fn to_pct_moves(&self, board: &Board) -> [u16; PCT_COUNT] {
+        let mut out = [0; PCT_COUNT];
+        for &hex in board.occupied_tiles[board.color().other().index()].iter() {
+            out[board.tile(hex).ptype().index()] += self.moves_by_tile[hex as usize];
+        }
+        out
+    }
 }
 
 #[test]

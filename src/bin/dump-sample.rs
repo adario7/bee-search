@@ -95,7 +95,8 @@ fn main() {
             let truth_static_white = if is_white { *static_raw } else { -*static_raw };
 
             let mlp_feat = board.features_fast(&moves);
-            let tg = board.get_token_graph_fast(&moves);
+            let other = board.other_moves();
+            let tg = board.get_token_graph_fast(&moves, &other);
 
             let comma = if sampled_count > 0 { "," } else { "" };
             writeln!(out_file, "  {comma}{{").unwrap();
