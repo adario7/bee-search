@@ -102,15 +102,19 @@ impl Uhp {
         }
     }
 
-    fn info(&mut self) -> UhpResult<()> {
+    pub fn engine_name() -> String {
         let version = env!("CARGO_PKG_VERSION");
         let hash = env!("GIT_HASH");
-        print!("id bee-search {}-{}", version, hash);
-        if MLP_EVAL { print!("-MLP"); }
-        else if FEATURES_EVAL { print!("-F"); }
-        if FORCE_ST { print!("-ST"); }
-        if cfg!(debug_assertions) { print!("-DEBUG"); }
-        println!();
+        let mut name = format!("bee-search {}-{}", version, hash);
+        if MLP_EVAL { name.push_str("-MLP"); }
+        else if FEATURES_EVAL { name.push_str("-F"); }
+        if FORCE_ST { name.push_str("-ST"); }
+        if cfg!(debug_assertions) { name.push_str("-DEBUG"); }
+        name
+    }
+
+    fn info(&mut self) -> UhpResult<()> {
+        println!("id {}", Self::engine_name());
         println!("Mosquito;Ladybug;Pillbug");
         Ok(())
     }

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 #[command(author, version, about = "MLP feature accumulation & inference throughput benchmark", long_about = None)]
 struct Args {
     /// Search depth to evaluate on each position
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(short, long, default_value_t = 6)]
     depth: Depth,
 
     /// Number of MLP inference iterations to execute in benchmark loop
