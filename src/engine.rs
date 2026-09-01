@@ -62,13 +62,15 @@ struct MoveInfo {
 }
 
 // Backed by MaybeUninit for the same reason as ActionList (see board.rs):
-// avoids zero-initializing all 256 slots on every construction when only
+// avoids zero-initializing all 512 slots on every construction when only
 // the first `len` are ever read.
 struct MoveInfoList {
-    moves: [std::mem::MaybeUninit<MoveInfo>; 256],
+    moves: [std::mem::MaybeUninit<MoveInfo>; 512],
     len: usize,
 }
 impl MoveInfoList {
+    const CAPACITY: usize = 512;
+
     fn new() -> Self {
         // SAFETY: see ActionList::new in board.rs - MaybeUninit<T> arrays
         // have no validity invariant, and only moves[..len] (always
@@ -79,9 +81,11 @@ impl MoveInfoList {
         self.len = 0;
     }
     fn push(&mut self, mvi: MoveInfo) {
-        debug_assert!(self.len < 256);
-        self.moves[self.len] = std::mem::MaybeUninit::new(mvi);
-        self.len += 1;
+        debug_assert!(self.len < Self::CAPACITY);
+        if self.len < Self::CAPACITY {
+            self.moves[self.len] = std::mem::MaybeUninit::new(mvi);
+            self.len += 1;
+        }
     }
     fn as_slice(&self) -> &[MoveInfo] {
         unsafe { std::slice::from_raw_parts(self.moves.as_ptr() as *const MoveInfo, self.len) }

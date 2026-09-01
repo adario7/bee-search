@@ -3,15 +3,28 @@ import json
 import os
 import gc
 import numpy as np
-import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
-from itertools import chain
+from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+
+TOTAL_FN = 436
+PIECE_FN = 11
+PIECES_PER_SIDE = 14
+PIECE_FEATURES_LEN = PIECES_PER_SIDE * 2 * PIECE_FN # 308
+ADJ_SIZE = 128
+
+SAMPLE_DTYPE = np.dtype([
+	('features', np.int16, (TOTAL_FN,)),
+	('eval', np.float32),
+	('winner', np.float32),
+	('static_eval', np.float32),
+	('turn_num', np.uint16),
+	('_pad', np.uint8, 2),
+])
 
 def load_json(path):
 	if not os.path.exists(path):
@@ -19,7 +32,7 @@ def load_json(path):
 	with open(path, "r") as f:
 		return json.load(f)
 
-def load_data(evals_path, features_path, static_path, clip_val):
+def load_data_from_json(evals_path, features_path, static_path, clip_val):
 	print(f"Loading evals from {evals_path}...")
 	raw_evals = load_json(evals_path)
 	print(f"Loading features from {features_path}...")
@@ -61,24 +74,34 @@ def load_data(evals_path, features_path, static_path, clip_val):
 		if vec.ndim != 1 or vec.shape[0] == 0:
 			continue
 
+		parts = pos.split(";")
+		is_black_turn = len(parts) >= 3 and parts[2].split("[")[0].strip().lower() == "black"
+
 		ev = rec.get("evaluation", 0)
 		try:
 			ev = float(ev)
 		except (ValueError, TypeError):
 			ev = 0.0
-		ev = float(np.clip(ev, -clip_val, clip_val))
+		# Convert search evaluation to White perspective
+		ev_white = -ev if is_black_turn else ev
+		ev_white = float(np.clip(ev_white, -clip_val, clip_val))
 
 		win = rec.get("winner", 0.0)
 		try:
 			win = float(win)
 		except (ValueError, TypeError):
 			win = 0.0
-		win = float(np.clip(win, 0.0, 1.0))
+		win_white = (1.0 - win) if is_black_turn else win
+		win_white = float(np.clip(win_white, 0.0, 1.0))
+
+		st = static_map.get(pos, None)
+		if st is not None and is_black_turn:
+			st = -st
 
 		matched_feats.append(vec)
-		matched_y.append(ev)
-		matched_w.append(win)
-		matched_static.append(static_map.get(pos, None))
+		matched_y.append(ev_white)
+		matched_w.append(win_white)
+		matched_static.append(st)
 
 	del raw_evals, feats_map, static_map
 	gc.collect()
@@ -86,7 +109,6 @@ def load_data(evals_path, features_path, static_path, clip_val):
 	if not matched_feats:
 		raise ValueError("No matching positions between evals and features")
 
-	# Find most common feature vector length to discard corrupted or partial rows
 	lengths = [f.shape[0] for f in matched_feats]
 	common_len = max(set(lengths), key=lengths.count)
 
@@ -131,7 +153,7 @@ _adj_perm = None
 def get_adj_perm():
 	global _adj_perm
 	if _adj_perm is None:
-		perm = [0] * 128
+		perm = [0] * ADJ_SIZE
 		for i in range(16):
 			for j in range(i, 16):
 				idx1 = adj_idx(i, j)
@@ -143,130 +165,300 @@ def get_adj_perm():
 		_adj_perm = np.array(perm, dtype=int)
 	return _adj_perm
 
+def sort_piece_group(cand, start_slot, count):
+	chunks = [cand[(start_slot + i) * PIECE_FN : (start_slot + i + 1) * PIECE_FN].copy() for i in range(count)]
+	chunks.sort(key=lambda x: tuple(x))
+	for i in range(count):
+		cand[(start_slot + i) * PIECE_FN : (start_slot + i + 1) * PIECE_FN] = chunks[i]
+
+def canonicalize_features(raw):
+	"""
+	Fast canonicalization: prunes candidate D6 transforms using WQ->BQ vector (raw[3..5]),
+	sorts duplicate piece groups, and selects the lexicographically minimal candidate.
+	"""
+	transforms = [
+		lambda q, r, s: (q, r, s),
+		lambda q, r, s: (-s, -q, -r),
+		lambda q, r, s: (r, s, q),
+		lambda q, r, s: (-q, -r, -s),
+		lambda q, r, s: (s, q, r),
+		lambda q, r, s: (-r, -s, -q),
+		lambda q, r, s: (-q, -s, -r),
+		lambda q, r, s: (r, q, s),
+		lambda q, r, s: (-s, -r, -q),
+		lambda q, r, s: (q, s, r),
+		lambda q, r, s: (-r, -q, -s),
+		lambda q, r, s: (s, r, q),
+	]
+
+	vq = (raw[3], raw[4], raw[5])
+	if vq != (0, 0, 0):
+		min_v = (999999, 999999, 999999)
+		candidates = []
+		for k in range(12):
+			vk = transforms[k](*vq)
+			if vk < min_v:
+				min_v = vk
+				candidates = [k]
+			elif vk == min_v:
+				candidates.append(k)
+	else:
+		candidates = list(range(12))
+
+	best = None
+	for k in candidates:
+		t = transforms[k]
+		cand = raw.copy()
+		for p in range(PIECES_PER_SIDE * 2):
+			base = p * PIECE_FN
+			qw, rw, sw = t(cand[base + 0], cand[base + 1], cand[base + 2])
+			qb, rb, sb = t(cand[base + 3], cand[base + 4], cand[base + 5])
+			cand[base + 0] = qw
+			cand[base + 1] = rw
+			cand[base + 2] = sw
+			cand[base + 3] = qb
+			cand[base + 4] = rb
+			cand[base + 5] = sb
+
+		# White piece groups
+		sort_piece_group(cand, 1, 3)
+		sort_piece_group(cand, 4, 2)
+		sort_piece_group(cand, 6, 3)
+		sort_piece_group(cand, 9, 2)
+
+		# Black piece groups
+		sort_piece_group(cand, 15, 3)
+		sort_piece_group(cand, 18, 2)
+		sort_piece_group(cand, 20, 3)
+		sort_piece_group(cand, 23, 2)
+
+		if len(candidates) == 1:
+			return cand
+
+		if best is None or tuple(cand) < tuple(best):
+			best = cand
+
+	return best
+
+def swap_features_color(f, adj_perm=None):
+	"""
+	Swaps White and Black perspective:
+	- White piece blocks (0..154) <-> Black piece blocks (154..308)
+	- Inside each piece: dq/dr/ds wrt WQ <-> dq/dr/ds wrt BQ, n_white <-> n_black
+	- Adjacency histogram (308..436) permuted via adj_perm
+	- Canonicalized across D6 symmetries and piece ordering
+	"""
+	if adj_perm is None:
+		adj_perm = get_adj_perm()
+
+	f_new = np.empty_like(f)
+	half_pieces = PIECES_PER_SIDE * PIECE_FN # 154
+
+	# Swap White and Black pieces, with internal coordinate / neighbor swap
+	for slot in range(PIECES_PER_SIDE):
+		w_base = slot * PIECE_FN
+		b_base = half_pieces + w_base
+
+		# New White piece (from old Black piece)
+		f_new[w_base + 0:w_base + 3] = f[b_base + 3:b_base + 6] # wrt WQ is old wrt BQ
+		f_new[w_base + 3:w_base + 6] = f[b_base + 0:b_base + 3] # wrt BQ is old wrt WQ
+		f_new[w_base + 6] = f[b_base + 7]                       # n_white is old n_black
+		f_new[w_base + 7] = f[b_base + 6]                       # n_black is old n_white
+		f_new[w_base + 8:w_base + 11] = f[b_base + 8:b_base + 11]
+
+		# New Black piece (from old White piece)
+		f_new[b_base + 0:b_base + 3] = f[w_base + 3:w_base + 6]
+		f_new[b_base + 3:b_base + 6] = f[w_base + 0:w_base + 3]
+		f_new[b_base + 6] = f[w_base + 7]
+		f_new[b_base + 7] = f[w_base + 6]
+		f_new[b_base + 8:b_base + 11] = f[w_base + 8:w_base + 11]
+
+	# Adjacency histogram permutation
+	f_new[PIECE_FEATURES_LEN:PIECE_FEATURES_LEN + ADJ_SIZE] = f[PIECE_FEATURES_LEN:PIECE_FEATURES_LEN + ADJ_SIZE][adj_perm]
+	return canonicalize_features(f_new)
+
+class LazyBinaryFeatureDataset(Dataset):
+	"""
+	Memory-Mapped Dataset reading directly from .bin file.
+	"""
+	def __init__(self, raw_mmap, indices, augment=False):
+		self.raw_mmap = raw_mmap
+		self.indices = np.asarray(indices, dtype=np.int64)
+		self.augment = augment
+		self.multiplier = 2 if augment else 1
+		self.adj_perm = get_adj_perm() if augment else None
+
+	def __len__(self):
+		return len(self.indices) * self.multiplier
+
+	def __getitem__(self, idx):
+		if self.augment:
+			orig_idx = self.indices[idx // 2]
+			is_swapped = (idx % 2 == 1)
+		else:
+			orig_idx = self.indices[idx]
+			is_swapped = False
+
+		record = self.raw_mmap[orig_idx]
+		feat = record['features'].astype(np.float32)
+		y = np.float32(record['eval'])
+		w = np.float32(record['winner'])
+		s = np.float32(record['static_eval'])
+
+		if is_swapped:
+			feat = swap_features_color(feat, self.adj_perm)
+			y = np.float32(-y)
+			w = np.float32(1.0 - w)
+			s = np.float32(-s)
+
+		return feat, y, w, s
+
+
 if __name__ == "__main__":
 	p = argparse.ArgumentParser()
+	p.add_argument("--bin", default="logs/features_mlp.bin", help="Path to binary features file (from extract-features)")
 	p.add_argument("--evals", default="logs/evaluations.json")
 	p.add_argument("--features", default="logs/position_features.json")
 	p.add_argument("--static", default="logs/position_static.json")
+	p.add_argument("--limit", type=int, default=None, help="Limit number of dataset samples to load")
 	p.add_argument("--test-size", type=float, default=0.1)
 	p.add_argument("--random-state", type=int, default=42)
 	p.add_argument("--clip", type=int, default=6000, help="Clip evaluations to [-clip, clip] before processing")
-	# MLP training hyperparams
-	p.add_argument("--mlp-epochs", type=int, default=150)
-	p.add_argument("--mlp-lr", type=float, default=5e-4)
-	p.add_argument("--mlp-batch", type=int, default=2048)
-	p.add_argument("--mlp-lambda", type=float, default=2e-3, help="Fixed weight for winner loss term")
-	p.add_argument("--mlp-l2", type=float, default=2e-5, help="L2 regularization coefficient")
+	# Training hyperparams
+	p.add_argument("--epochs", type=int, default=150)
+	p.add_argument("--lr", type=float, default=5e-4)
+	p.add_argument("--batch", type=int, default=2048)
+	p.add_argument("--lambda-w", type=float, default=2e-3, help="Fixed weight for winner loss term")
+	p.add_argument("--l2", type=float, default=3e-5, help="L2 regularization coefficient")
 	p.add_argument("--skip-lr", action="store_true", help="Skip Linear Regression and do only MLP")
 	p.add_argument("--no-adj", action="store_true", help="Zero out all 128 adjacency matrix features for ablation testing")
 	p.add_argument("--load-ckpt", default=None, help="Path to checkpoint .pth to load")
 	args = p.parse_args()
 
-	X_full, y_full, winner_full, static_list = load_data(args.evals, args.features, args.static, clip_val=args.clip)
-	n_original = len(y_full)
-	print(f"Loaded {n_original} matched positions")
+	using_bin = os.path.exists(args.bin)
+	if using_bin:
+		print(f"Loading binary dataset from {args.bin}...")
+		mmap_data = np.memmap(args.bin, dtype=SAMPLE_DTYPE, mode='r')
+		n_samples = len(mmap_data)
+		if args.limit is not None and args.limit < n_samples:
+			n_samples = args.limit
+			mmap_data = mmap_data[:n_samples]
+			print(f"Limiting to first {n_samples:,} samples (from --limit)")
+		print(f"Loaded {n_samples:,} samples from {args.bin}")
+		L = TOTAL_FN
 
-	# symmetric augmentation approach:
-	L = X_full.shape[1]
-	ADJ = 128
-	N = (L - ADJ) // 2
+		# Split by position pairs (2 samples per position: original and precomputed symmetric variant)
+		n_pairs = n_samples // 2
+		if n_pairs > 0:
+			pair_idx = np.arange(n_pairs)
+			pair_train, pair_test = train_test_split(pair_idx, test_size=args.test_size, random_state=args.random_state)
+			idx_train = np.sort(np.concatenate([pair_train * 2, pair_train * 2 + 1]))
+			idx_test = np.sort(np.concatenate([pair_test * 2, pair_test * 2 + 1]))
+		else:
+			idx = np.arange(n_samples)
+			idx_train, idx_test = train_test_split(idx, test_size=args.test_size, random_state=args.random_state)
 
-	if args.no_adj:
-		print("Flag --no-adj enabled: Zeroing out all 128 adjacency matrix features.")
-		X_full[:, 2*N:] = 0
+		print(f"Loading {len(idx_train):,} train & {len(idx_test):,} test tensors into RAM for zero-overhead GPU feeding...")
+		X_train = torch.from_numpy(mmap_data['features'][idx_train].astype(np.float32))
+		y_train = torch.from_numpy(mmap_data['eval'][idx_train].astype(np.float32))
+		w_train = torch.from_numpy(mmap_data['winner'][idx_train].astype(np.float32))
+		s_train = torch.from_numpy(mmap_data['static_eval'][idx_train].astype(np.float32))
 
-	# split ORIGINAL rows to avoid leakage between original and its symmetric counterpart
-	idx = np.arange(n_original)
-	idx_train, idx_test = train_test_split(idx, test_size=args.test_size, random_state=args.random_state)
+		X_test = torch.from_numpy(mmap_data['features'][idx_test].astype(np.float32))
+		y_test = torch.from_numpy(mmap_data['eval'][idx_test].astype(np.float32))
+		w_test = torch.from_numpy(mmap_data['winner'][idx_test].astype(np.float32))
+		s_test = torch.from_numpy(mmap_data['static_eval'][idx_test].astype(np.float32))
 
-	def augment_indices(indices):
-		n_sub = len(indices)
-		adj_perm = get_adj_perm()
-		X_aug = np.empty((n_sub * 2, L), dtype=np.float32)
-		y_aug = np.empty(n_sub * 2, dtype=np.float32)
-		w_aug = np.empty(n_sub * 2, dtype=np.float32)
-		static_aug = []
+		class FastTensorDataset(Dataset):
+			def __init__(self, x, y, w, s):
+				self.x = x
+				self.y = y
+				self.w = w
+				self.s = s
+			def __len__(self):
+				return len(self.x)
+			def __getitem__(self, i):
+				return self.x[i], self.y[i], self.w[i], self.s[i]
 
-		for idx_out, i in enumerate(indices):
-			f = X_full[i]
-			y = y_full[i]
-			w = winner_full[i]
-			s = static_list[i]
+		train_ds = FastTensorDataset(X_train, y_train, w_train, s_train)
+		test_ds = FastTensorDataset(X_test, y_test, w_test, s_test)
 
-			# original
-			row_orig = idx_out * 2
-			X_aug[row_orig] = f
-			y_aug[row_orig] = y
-			w_aug[row_orig] = w
-			static_aug.append(s)
+		train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, pin_memory=torch.cuda.is_available())
+		test_loader = DataLoader(test_ds, batch_size=args.batch, shuffle=False)
 
-			# swapped counterpart
-			row_swap = idx_out * 2 + 1
-			f_swapped = np.concatenate([f[N:2*N], f[:N], f[2*N:][adj_perm]])
-			X_aug[row_swap] = f_swapped
-			y_aug[row_swap] = -y
-			w_aug[row_swap] = 1.0 - w
-			static_aug.append(-s if s is not None else None)
-
-		return X_aug, y_aug, w_aug, static_aug
-
-	X_train_aug, y_train_aug, winner_train_aug, static_train_aug = augment_indices(idx_train)
-	X_test_aug, y_test_aug, winner_test_aug, static_test_aug = augment_indices(idx_test)
-
-	# Free initial dataset arrays to minimize RAM usage
-	zero_ratio = float(np.mean(X_full == 0))
-	del X_full, y_full, winner_full, static_list
-	gc.collect()
-
-	# prepare static predictor metrics: only on test augmented samples that have static
-	mask_static = np.array([s is not None for s in static_test_aug])
-	n_test_with_static = int(mask_static.sum())
-	if n_test_with_static == 0:
-		static_metrics = None
+		# Estimate zero ratio from a sample
+		sample_feats = mmap_data['features'][:min(1000, n_samples)]
+		zero_ratio = float(np.mean(sample_feats == 0))
 	else:
-		y_test_sub = y_test_aug[mask_static].astype(float)
-		static_preds = np.array([s for s in static_test_aug if s is not None], dtype=float)
-		static_metrics = metrics(y_test_sub, static_preds)
+		X_full, y_full, winner_full, static_list = load_data_from_json(args.evals, args.features, args.static, clip_val=args.clip)
+		n_original = len(y_full)
+		if args.limit is not None and args.limit < n_original:
+			n_original = args.limit
+			X_full = X_full[:n_original]
+			y_full = y_full[:n_original]
+			winner_full = winner_full[:n_original]
+			static_list = static_list[:n_original]
+			print(f"Limiting to first {n_original:,} samples (from --limit)")
+		print(f"Loaded {n_original} matched positions from JSON")
+		L = X_full.shape[1]
 
-	if static_metrics:
-		print("\nStatic_eval predictor (on same augmented subset):")
-		print(f"  RMSE: {static_metrics['rmse']:.4f}")
-		print(f"  MAE:  {static_metrics['mae']:.4f}")
-		print(f"  R2:   {static_metrics['r2']:.4f}")
-	else:
-		print("\nNo static_eval available in test set for comparison.")
+		idx = np.arange(n_original)
+		idx_train, idx_test = train_test_split(idx, test_size=args.test_size, random_state=args.random_state)
 
-	if not args.skip_lr:
-		# fit linear model on FULL vectors but force intercept=0 to satisfy equivalence
-		model = LinearRegression(fit_intercept=False)
-		model.fit(X_train_aug, y_train_aug)
-		y_pred_test = model.predict(X_test_aug)
+		def augment_indices(indices):
+			n_sub = len(indices)
+			adj_perm = get_adj_perm()
+			X_aug = np.empty((n_sub * 2, L), dtype=np.float32)
+			y_aug = np.empty(n_sub * 2, dtype=np.float32)
+			w_aug = np.empty(n_sub * 2, dtype=np.float32)
+			static_aug = []
 
-		reg_metrics_full = metrics(y_test_aug, y_pred_test)
+			for idx_out, i in enumerate(indices):
+				f = X_full[i]
+				y = y_full[i]
+				w = winner_full[i]
+				s = static_list[i]
 
-		print(f"n_original_samples: {n_original}, n_features_full: {L}, N_half: {N}, ADJ_len: {ADJ}")
-		print(f"train_size (augmented): {len(X_train_aug)}, test_size (augmented): {len(X_test_aug)}, test_with_static: {n_test_with_static}")
-		print("\nLinear Regression (symmetric augmentation, intercept=0) on test set:")
-		print(f"  RMSE: {reg_metrics_full['rmse']:.4f}")
-		print(f"  MAE:  {reg_metrics_full['mae']:.4f}")
-		print(f"  R2:   {reg_metrics_full['r2']:.4f}")
+				row_orig = idx_out * 2
+				X_aug[row_orig] = f
+				y_aug[row_orig] = y
+				w_aug[row_orig] = w
+				static_aug.append(s)
 
-		coeffs = model.coef_.astype(float)
-		w1 = coeffs[:N]
-		w2 = coeffs[N:2*N]
-		symmetry_err = np.max(np.abs(w2 + w1))
-		print("\nLinear model parameters (full-length coeffs):")
-		print("Intercept: 0.0 (enforced)")
-		print("Coefficients:", list(map(float, coeffs)))
-		print(f"Max |w2 + w1| (symmetry check): {symmetry_err:.6g}")
-		print("Reduced weights (first-half, equivalent to model on (first-half - second-half)):")
-		print(list(map(float, w1)))
-	else:
-		print("\nSkipping Linear Regression.")
+				row_swap = idx_out * 2 + 1
+				f_swapped = swap_features_color(f, adj_perm)
+				X_aug[row_swap] = f_swapped
+				y_aug[row_swap] = -y
+				w_aug[row_swap] = 1.0 - w
+				static_aug.append(-s if s is not None else None)
+
+			return X_aug, y_aug, w_aug, static_aug
+
+		X_train_aug, y_train_aug, winner_train_aug, static_train_aug = augment_indices(idx_train)
+		X_test_aug, y_test_aug, winner_test_aug, static_test_aug = augment_indices(idx_test)
+
+		zero_ratio = float(np.mean(X_full == 0))
+		del X_full, y_full, winner_full, static_list
+		gc.collect()
+
+		class SimpleTensorDataset(Dataset):
+			def __init__(self, x, y, w, s):
+				self.x = torch.from_numpy(x)
+				self.y = torch.from_numpy(y)
+				self.w = torch.from_numpy(w)
+				self.s = s
+			def __len__(self):
+				return len(self.x)
+			def __getitem__(self, i):
+				s_val = self.s[i] if self.s[i] is not None else 0.0
+				return self.x[i], self.y[i], self.w[i], s_val
+
+		train_loader = DataLoader(SimpleTensorDataset(X_train_aug, y_train_aug, winner_train_aug, static_train_aug), batch_size=args.batch, shuffle=True)
+		test_loader = DataLoader(SimpleTensorDataset(X_test_aug, y_test_aug, winner_test_aug, static_test_aug), batch_size=args.batch, shuffle=False)
 
 	# -------------------- MLP -------------------------
 
-	print("-- MLP --")
+	print("\n-- MLP --")
 
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	torch.manual_seed(args.random_state)
@@ -274,15 +466,14 @@ if __name__ == "__main__":
 	class SingleMLP(nn.Module):
 		def __init__(self, in_dim):
 			super().__init__()
-			# output two values: [eval_raw, winner_raw]
 			self.net = nn.Sequential(
-				nn.Linear(in_dim, 48),
+				nn.Linear(in_dim, 64),
 				nn.ReLU(),
-				nn.Linear(48, 28),
+				nn.Linear(64, 32),
 				nn.ReLU(),
-				nn.Linear(28, 14),
+				nn.Linear(32, 16),
 				nn.ReLU(),
-				nn.Linear(14, 8),
+				nn.Linear(16, 8),
 				nn.ReLU(),
 				nn.Linear(8, 2)
 			)
@@ -328,47 +519,35 @@ if __name__ == "__main__":
 
 	all_params = list(model.parameters())
 	params, max_flops, expected_flops = count_model_stats(model, zero_ratio)
-	print("\nModel Summary:")
+	print("Model Summary:")
 	print(f"  Total parameters: {params:,}")
 	print(f"  Input feature dimension: {L}")
 	print(f"  Average zero features: {zero_ratio*100:.2f}% ({L * zero_ratio:.1f} / {L} entries)")
 	print(f"  Max FLOPs (100% non-zero inputs): {max_flops:,}")
 	print(f"  Expected FLOPs (skipping zero inputs in layer 1): {expected_flops:,.1f}\n")
 
-	optimizer = torch.optim.Adam(all_params, lr=args.mlp_lr)
-	scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.mlp_epochs, eta_min=args.mlp_lr*1e-2)
+	optimizer = torch.optim.Adam(all_params, lr=args.lr)
+	scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr*2e-2)
 	loss_fn_eval = nn.MSELoss()
 	loss_fn_winner = nn.BCELoss()
-	lambda_w = args.mlp_lambda
-	l2_coef = args.mlp_l2
-
-	# prepare dataloaders
-	Xtr = torch.from_numpy(X_train_aug.astype(np.float32))
-	Ytr = torch.from_numpy(y_train_aug.astype(np.float32))
-	Wtr = torch.from_numpy(winner_train_aug.astype(np.float32))
-	Xte = torch.from_numpy(X_test_aug.astype(np.float32))
-	Yte = torch.from_numpy(y_test_aug.astype(np.float32))
-	Wte = torch.from_numpy(winner_test_aug.astype(np.float32))
-
-	train_ds = TensorDataset(Xtr, Ytr, Wtr)
-	train_loader = DataLoader(train_ds, batch_size=args.mlp_batch, shuffle=True)
+	lambda_w = args.lambda_w
+	l2_coef = args.l2
 
 	best_val_loss = float('inf')
 	best_state = None
 	best_epoch = -1
 	history = {'train_loss': [], 'test_loss': []}
 
-	for epoch in range(args.mlp_epochs):
-		running_eval_loss = 0.0
-		running_eval_rmse = 0.0
-		running_winner_loss = 0.0
-		running_winner_mae = 0.0
-		running_reg_loss = 0.0
-		running_total_loss = 0.0
+	for epoch in range(args.epochs):
+		running_eval_loss = torch.tensor(0.0, device=device)
+		running_eval_sq_err = torch.tensor(0.0, device=device)
+		running_winner_loss = torch.tensor(0.0, device=device)
+		running_winner_abs_err = torch.tensor(0.0, device=device)
+		running_total_loss = torch.tensor(0.0, device=device)
 		total = 0
 		model.train()
-		for xb, yb, wb in train_loader:
-			xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
+		for xb, yb, wb, _ in train_loader:
+			xb, yb, wb = xb.to(device).float(), yb.to(device).float(), wb.to(device).float()
 			pred_eval, pred_winner = model(xb)
 			loss_eval = loss_fn_eval(pred_eval/args.clip, yb/args.clip)
 			loss_winner = lambda_w * loss_fn_winner(pred_winner, wb)
@@ -376,46 +555,56 @@ if __name__ == "__main__":
 			loss = loss_eval + loss_winner + l2_reg
 			optimizer.zero_grad(); loss.backward(); optimizer.step()
 			bs = xb.size(0)
-			running_eval_loss += loss_eval.item() * bs
-			running_eval_rmse += ((pred_eval - yb)**2).sum().item()
-			running_winner_loss += loss_winner.item() * bs
-			running_winner_mae += (pred_winner - wb).abs().sum().item()
-			running_reg_loss += l2_reg.item() * bs
-			running_total_loss += loss.item() * bs
+			running_eval_loss += loss_eval.detach() * bs
+			running_eval_sq_err += ((pred_eval.detach() - yb)**2).sum()
+			running_winner_loss += loss_winner.detach() * bs
+			running_winner_abs_err += (pred_winner.detach() - wb).abs().sum()
+			running_total_loss += loss.detach() * bs
 			total += bs
-		train_eval_loss = running_eval_loss / total
-		train_eval_rmse = (running_eval_rmse / total) ** 0.5
-		train_winner_loss = running_winner_loss / total
-		train_winner_mae = running_winner_mae / total
-		train_reg_loss = running_reg_loss / total
-		train_total_loss = running_total_loss / total
+		train_eval_loss = (running_eval_loss / total).item()
+		train_eval_rmse = ((running_eval_sq_err / total) ** 0.5).item()
+		train_winner_loss = (running_winner_loss / total).item()
+		train_winner_mae = (running_winner_abs_err / total).item()
+		train_reg_loss = (l2_coef * sum(p.pow(2).sum() for p in all_params)).item()
+		train_total_loss = (running_total_loss / total).item()
 
 		model.eval()
+		val_eval_loss_t = torch.tensor(0.0, device=device)
+		val_eval_sq_err = torch.tensor(0.0, device=device)
+		val_winner_loss_t = torch.tensor(0.0, device=device)
+		val_winner_abs_err = torch.tensor(0.0, device=device)
+		val_total = 0
 		with torch.no_grad():
-			Xte_dev = Xte.to(device); Yte_dev = Yte.to(device); Wte_dev = Wte.to(device)
-			val_eval_pred, val_winner_pred = model(Xte_dev)
-			val_eval_loss = loss_fn_eval(val_eval_pred/args.clip, Yte_dev/args.clip).item()
-			val_eval_rmse = ((val_eval_pred - Yte_dev)**2).mean().item() ** 0.5
-			val_winner_loss = lambda_w * loss_fn_winner(val_winner_pred, Wte_dev).item()
-			val_winner_mae = (val_winner_pred - Wte_dev).abs().mean().item()
-			val_l2_reg = l2_coef * sum(p.pow(2).sum() for p in all_params).item()
-			val_reg_loss = val_l2_reg
-			val_total_loss = val_eval_loss + val_winner_loss + val_reg_loss
+			for xb, yb, wb, _ in test_loader:
+				xb, yb, wb = xb.to(device).float(), yb.to(device).float(), wb.to(device).float()
+				val_eval_pred, val_winner_pred = model(xb)
+				bs = xb.size(0)
+				val_eval_loss_t += loss_fn_eval(val_eval_pred/args.clip, yb/args.clip) * bs
+				val_eval_sq_err += ((val_eval_pred - yb)**2).sum()
+				val_winner_loss_t += lambda_w * loss_fn_winner(val_winner_pred, wb) * bs
+				val_winner_abs_err += (val_winner_pred - wb).abs().sum()
+				val_total += bs
 
-			if val_eval_loss < best_val_loss:
-				best_val_loss = val_eval_loss
-				best_epoch = epoch + 1
-				best_state = {'model': {k: v.cpu().clone() for k, v in model.state_dict().items()}}
-		
+		val_eval_loss = (val_eval_loss_t / val_total).item()
+		val_eval_rmse = ((val_eval_sq_err / val_total) ** 0.5).item()
+		val_winner_loss = (val_winner_loss_t / val_total).item()
+		val_winner_mae = (val_winner_abs_err / val_total).item()
+		val_reg_loss = (l2_coef * sum(p.pow(2).sum() for p in all_params)).item()
+		val_total_loss = val_eval_loss + val_winner_loss + val_reg_loss
+
+		if val_eval_loss < best_val_loss:
+			best_val_loss = val_eval_loss
+			best_epoch = epoch + 1
+			best_state = {'model': {k: v.cpu().clone() for k, v in model.state_dict().items()}}
+
 		history['train_loss'].append(train_total_loss)
 		history['test_loss'].append(val_total_loss)
 
 		cur_lr = optimizer.param_groups[0]['lr']
 		scheduler.step()
 
-		model.train()
 		print(
-			f"Epoch {epoch+1}/{args.mlp_epochs} lr={cur_lr:.2e} | "
+			f"Epoch {epoch+1:3d}/{args.epochs} lr={cur_lr:.2e} | "
 			f"TRAIN eval={train_eval_rmse:.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
 			f"TEST  eval={val_eval_rmse:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}={100*val_eval_loss:.4f}+{100*val_winner_loss:.4f}+{100*val_reg_loss:.4f}"
 		)
@@ -426,9 +615,10 @@ if __name__ == "__main__":
 		# Save best model
 		save_path = "logs/best_mlp_eval.pth"
 		torch.save(best_state, save_path)
-		print(f"Best model saved to {save_path}")
+		print(f"\nBest model (epoch {best_epoch}) saved to {save_path}")
 
 	# plot loss history
+	os.makedirs("logs", exist_ok=True)
 	plt.figure(figsize=(10, 6))
 	plt.plot(history['train_loss'], label='Train Total Loss')
 	plt.plot(history['test_loss'], label='Test Total Loss')
@@ -438,20 +628,25 @@ if __name__ == "__main__":
 	plt.legend()
 	plt.grid(True)
 	plt.savefig("logs/training_loss.png")
-	print("\nLoss plot saved to logs/training_loss.png")
+	print("Loss plot saved to logs/training_loss.png")
 	with open("logs/training_history.json", "w") as f:
 		json.dump(history, f)
 
 	model.eval()
+	all_preds, all_y = [], []
 	with torch.no_grad():
-		Xte_dev = Xte.to(device)
-		eval_preds, winner_preds = model(Xte_dev)
-		mlp_preds = eval_preds.cpu().numpy()
+		for xb, yb, _, _ in test_loader:
+			xb = xb.to(device).float()
+			eval_preds, _ = model(xb)
+			all_preds.append(eval_preds.cpu().numpy())
+			all_y.append(yb.numpy())
 
-	mlp_metrics = metrics(y_test_aug, mlp_preds)
+	mlp_preds = np.concatenate(all_preds)
+	y_test_true = np.concatenate(all_y)
+	mlp_metrics = metrics(y_test_true, mlp_preds)
 
 	print(f"\nBest epoch (by val loss): {best_epoch}, val_total_loss: {best_val_loss:.6f}")
-	print("\nMLP on test set (using best-epoch weights) - evaluation output:")
+	print("MLP on test set (using best-epoch weights) - evaluation output:")
 	print(f"  RMSE: {mlp_metrics['rmse']:.4f}")
 	print(f"  MAE:  {mlp_metrics['mae']:.4f}")
 	print(f"  R2:   {mlp_metrics['r2']:.4f}")
@@ -471,12 +666,10 @@ if __name__ == "__main__":
 			is_final_last_w = (name == last_w_name)
 			is_final_last_b = (name == last_b_name)
 			if arr.ndim == 2:
-				# if this is the final layer producing 2 outputs, keep only the first row (eval head)
 				if is_final_last_w and arr.shape[0] == 2:
 					arr_print = arr[0:1, :]
 				else:
 					arr_print = arr
-				# PyTorch weights are (out_features, in_features). Transpose to (in_features, out_features) for Rust.
 				arr_print = arr_print.T
 				r, c = arr_print.shape
 				ident = f"{prefix}W{next_layer}{next_layer+1}"
@@ -488,7 +681,6 @@ if __name__ == "__main__":
 				last_bias_layer = next_layer + 1
 				next_layer += 1
 			elif arr.ndim == 1:
-				# if this is the final bias for the 2-output layer, keep only the first element
 				if is_final_last_b and arr.shape[0] == 2:
 					arr_print = arr[:1]
 				else:
@@ -506,4 +698,5 @@ if __name__ == "__main__":
 		write_module_weights(f, model.named_parameters(), "M_", 0)
 
 	print(f"Rust weights written to {rust_out_path}")
+
 
