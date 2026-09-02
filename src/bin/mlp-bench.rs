@@ -1,6 +1,6 @@
 use bee_search::board::{Action, Board, GameResult};
 use bee_search::engine::{Depth, Engine};
-use bee_search::eval_mlp::{mlp_inference, set_accumulation, take_accumulated_features};
+use bee_search::eval_mlp::{mlp_inference, set_accumulation, take_accumulated_features, take_accumulated_layer_zero_stats};
 use clap::Parser;
 use std::hint::black_box;
 use rand::seq::IndexedRandom;
@@ -82,8 +82,29 @@ fn main() {
     set_accumulation(false);
 
     let accumulated = take_accumulated_features();
+    let zero_stats = take_accumulated_layer_zero_stats();
     let n = accumulated.len();
     println!("\nTotal accumulated feature vectors N = {}", n);
+
+    if zero_stats.count > 0 {
+        println!("\n=== LAYER INPUT ZERO FEATURE ANALYSIS ===");
+        println!("Inferences evaluated: {}", zero_stats.count);
+        for layer_idx in 0..5 {
+            let size = zero_stats.layer_sizes[layer_idx];
+            let avg_z = zero_stats.avg_zeros(layer_idx);
+            let pct = zero_stats.zero_percentage(layer_idx);
+            println!(
+                "  Layer {} ({:3} inputs): avg {:6.2} / {:3} zeros ({:6.2}%)",
+                layer_idx + 1,
+                size,
+                avg_z,
+                size,
+                pct
+            );
+        }
+        println!("=========================================");
+    }
+
     if n < 2 {
         println!("Error: Not enough feature vectors accumulated to run benchmark.");
         return;

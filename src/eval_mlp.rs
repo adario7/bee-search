@@ -20,15 +20,50 @@ Model Summary:
   Expected FLOPs (skipping zero inputs in layer 1): 8,573.0
 */
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayerZeroStats {
+    pub count: usize,
+    pub layer_sizes: [usize; 5],
+    pub zero_counts: [usize; 5],
+}
+
+impl LayerZeroStats {
+    pub fn avg_zeros(&self, layer_idx: usize) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.zero_counts[layer_idx] as f64 / self.count as f64
+        }
+    }
+
+    pub fn zero_percentage(&self, layer_idx: usize) -> f64 {
+        let size = self.layer_sizes[layer_idx];
+        if size == 0 {
+            0.0
+        } else {
+            (self.avg_zeros(layer_idx) / size as f64) * 100.0
+        }
+    }
+}
+
 // state & helper functions for mlp-bench
 static ACCUMULATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static ACCUMULATED_X: Mutex<Vec<Vec<i16>>> = Mutex::new(Vec::new());
+static ACCUMULATED_ZERO_STATS: Mutex<LayerZeroStats> = Mutex::new(LayerZeroStats {
+    count: 0,
+    layer_sizes: [0; 5],
+    zero_counts: [0; 5],
+});
+
 pub fn set_accumulation(enabled: bool) {
     ACCUMULATE_ENABLED.store(enabled, Ordering::Relaxed);
 }
 pub fn clear_accumulated_features() {
     if let Ok(mut guard) = ACCUMULATED_X.lock() {
         guard.clear();
+    }
+    if let Ok(mut guard) = ACCUMULATED_ZERO_STATS.lock() {
+        *guard = LayerZeroStats::default();
     }
 }
 pub fn take_accumulated_features() -> Vec<Vec<i16>> {
@@ -39,14 +74,23 @@ pub fn take_accumulated_features() -> Vec<Vec<i16>> {
         Vec::new()
     }
 }
+pub fn take_accumulated_layer_zero_stats() -> LayerZeroStats {
+    ACCUMULATE_ENABLED.store(false, Ordering::Relaxed);
+    if let Ok(mut guard) = ACCUMULATED_ZERO_STATS.lock() {
+        std::mem::take(&mut *guard)
+    } else {
+        LayerZeroStats::default()
+    }
+}
+pub fn get_accumulated_layer_zero_stats() -> LayerZeroStats {
+    if let Ok(guard) = ACCUMULATED_ZERO_STATS.lock() {
+        guard.clone()
+    } else {
+        LayerZeroStats::default()
+    }
+}
 
 pub fn mlp_inference(x: &[i16]) -> Eval {
-    if ACCUMULATE_ENABLED.load(Ordering::Relaxed) {
-        if let Ok(mut guard) = ACCUMULATED_X.lock() {
-            guard.push(x.to_vec());
-        }
-    }
-
     // convert i16 features to f32
     let mut x0 = [0.0f32; Board::TOTAL_FN];
     for i in 0..Board::TOTAL_FN {
@@ -55,43 +99,64 @@ pub fn mlp_inference(x: &[i16]) -> Eval {
 
     // layer 1: 232 -> 64
     let mut x1 = [0.0f32; M_B1.len()];
-    layer(&x0, M_W01.as_flattened(), &M_B1, &mut x1, true);
+    layer::<true, true>(&x0, M_W01.as_flattened(), &M_B1, &mut x1);
 
     // layer 2: 64 -> 32
     let mut x2 = [0.0f32; M_B2.len()];
-    layer(&x1, M_W12.as_flattened(), &M_B2, &mut x2, true);
+    layer::<false, true>(&x1, M_W12.as_flattened(), &M_B2, &mut x2);
 
     // layer 3: 32 -> 16
     let mut x3 = [0.0f32; M_B3.len()];
-    layer(&x2, M_W23.as_flattened(), &M_B3, &mut x3, true);
+    layer::<false, true>(&x2, M_W23.as_flattened(), &M_B3, &mut x3);
 
     // layer 4: 16 -> 8
     let mut x4 = [0.0f32; M_B4.len()];
-    layer(&x3, M_W34.as_flattened(), &M_B4, &mut x4, true);
+    layer::<false, true>(&x3, M_W34.as_flattened(), &M_B4, &mut x4);
 
     // layer 5 (output): 8 -> 1
     let mut x5 = [0.0f32; M_B5.len()];
-    layer(&x4, M_W45.as_flattened(), &M_B5, &mut x5, false);
+    layer::<false, false>(&x4, M_W45.as_flattened(), &M_B5, &mut x5);
 
     let logit = x5[0];
     let output = (softsign(logit) * 1.5).clamp(-1.0, 1.0) * 6000.0;
-    output.round() as Eval
+    let result = output.round() as Eval;
+
+    let accumulate = ACCUMULATE_ENABLED.load(Ordering::Relaxed);
+    if accumulate {
+        if let Ok(mut guard) = ACCUMULATED_X.lock() {
+            guard.push(x.to_vec());
+        }
+        if let Ok(mut guard) = ACCUMULATED_ZERO_STATS.lock() {
+            guard.count += 1;
+            guard.layer_sizes = [x0.len(), x1.len(), x2.len(), x3.len(), x4.len()];
+            guard.zero_counts[0] += x0.iter().filter(|&&v| v == 0.0).count();
+            guard.zero_counts[1] += x1.iter().filter(|&&v| v == 0.0).count();
+            guard.zero_counts[2] += x2.iter().filter(|&&v| v == 0.0).count();
+            guard.zero_counts[3] += x3.iter().filter(|&&v| v == 0.0).count();
+            guard.zero_counts[4] += x4.iter().filter(|&&v| v == 0.0).count();
+        }
+    }
+
+    result
 }
 
-fn layer(x: &[f32], w: &[f32], b: &[f32], y: &mut [f32], relu: bool) {
+// checking for zeros on the intermediate layers causes a lot of expensive branch misses
+// further layers only require a few SIMD operations, so checks would only break the pipeline to skip at most ~50% FLOPs
+// on layer 0 where ~80% of inputs are zero and the output is bigger, checks are worth it
+fn layer<const CHECK_ZERO: bool, const RELU: bool>(x: &[f32], w: &[f32], b: &[f32], y: &mut [f32]) {
     debug_assert_eq!(w.len(), x.len() * y.len());
     debug_assert_eq!(b.len(), y.len());
     y.copy_from_slice(b);
     let y_len = y.len();
     for i in 0..x.len() {
         let xi = x[i];
-        if xi == 0.0 { continue; }
+        if cfg!(any(target_arch = "x86", target_arch = "x86_64")) && CHECK_ZERO && xi == 0.0 { continue; }
         let w_row = &w[i * y_len..(i + 1) * y_len];
         for j in 0..y_len {
             y[j] += w_row[j] * xi;
         }
     }
-    if relu {
+    if RELU {
         for yj in y.iter_mut() {
             *yj = yj.max(0.0);
         }
@@ -457,3 +522,25 @@ const M_W45: [[f32; 1]; 8] = [
 ];
 
 const M_B5: [f32; 1] = [-1.69833615e-01f32];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layer_zero_stats_accumulation() {
+        clear_accumulated_features();
+        set_accumulation(true);
+
+        let dummy_input = [0i16; Board::TOTAL_FN];
+        mlp_inference(&dummy_input);
+
+        let stats = take_accumulated_layer_zero_stats();
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.layer_sizes, [232, 48, 32, 16, 8]);
+        assert_eq!(stats.zero_counts[0], 232);
+        assert_eq!(stats.zero_percentage(0), 100.0);
+
+        clear_accumulated_features();
+    }
+}
