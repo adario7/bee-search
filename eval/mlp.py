@@ -359,14 +359,15 @@ if __name__ == "__main__":
 	p.add_argument("--test-size", type=float, default=0.1)
 	p.add_argument("--random-state", type=int, default=42)
 	p.add_argument("--clip", type=int, default=6000, help="Clip evaluations to [-clip, clip] before processing")
-	# Training hyperparams
 	p.add_argument("--epochs", type=int, default=150)
 	p.add_argument("--lr0", type=float, default=2e-4)
 	p.add_argument("--lr1", type=float, default=1e-5)
 	p.add_argument("--batch", type=int, default=2048)
 	p.add_argument("--dropout", type=float, default=0.1, help="Dropout rate after hidden ReLU layers")
 	p.add_argument("--input-dropout", type=float, default=0.0, help="Dropout rate directly on input features (default: 0.0)")
-	p.add_argument("--lambda-w", type=float, default=2e-3, help="Fixed weight for winner loss term")
+	p.add_argument("--lambda-w", type=float, default=0.3, help="Weight for winner contribution in target blend: target = lambda * winner_cp + (1 - lambda) * eval")
+	p.add_argument("--huber-delta", type=float, default=1000.0, help="Delta (cp) where Huber loss transitions from quadratic to linear")
+	p.add_argument("--win-scale", type=float, default=2000.0, help="Scale parameter for logistic winner -> cp conversion")
 	p.add_argument("--l2", type=float, default=5e-5, help="L2 regularization coefficient")
 	p.add_argument("--skip-lr", action="store_true", help="Skip Linear Regression and do only MLP")
 	p.add_argument("--no-adj", action="store_true", help="Zero out all 128 adjacency matrix features for ablation testing")
@@ -479,8 +480,17 @@ if __name__ == "__main__":
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	torch.manual_seed(args.random_state)
 
+	def winner_to_cp(w, s=args.win_scale, clip=args.clip):
+		"""Convert win probability w in [0, 1] to centipawns in [-clip, clip] using the fitted logit curve."""
+		ratio = torch.exp(torch.tensor(clip / s, device=w.device, dtype=w.dtype))
+		eps = 1.0 / (ratio - 1.0)
+		num = w + eps
+		den = 1.0 - w + eps
+		cp = s * torch.log(num / den)
+		return torch.clamp(cp, -clip, clip)
+
 	class SingleMLP(nn.Module):
-		def __init__(self, in_dim, dropout=0.15, input_dropout=0.0):
+		def __init__(self, in_dim, dropout=0.1, input_dropout=0.0):
 			super().__init__()
 			self.input_drop = nn.Dropout(input_dropout) if input_dropout > 0.0 else nn.Identity()
 			self.fc1 = nn.Linear(in_dim, 64)
@@ -491,7 +501,7 @@ if __name__ == "__main__":
 			self.drop3 = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 			self.fc4 = nn.Linear(16, 8)
 			self.drop4 = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
-			self.fc5 = nn.Linear(8, 2)
+			self.fc5 = nn.Linear(8, 1)
 			self.linear_layers = [self.fc1, self.fc2, self.fc3, self.fc4, self.fc5]
 
 		def forward(self, x):
@@ -501,9 +511,8 @@ if __name__ == "__main__":
 			x = self.drop3(torch.relu(self.fc3(x)))
 			x = self.drop4(torch.relu(self.fc4(x)))
 			out = self.fc5(x)
-			eval_out = torch.nn.functional.softsign(out[:, 0]) * 1.5 * args.clip
-			winner_out = torch.sigmoid(out[:, 1])
-			return eval_out, winner_out
+			eval_out = torch.clamp(torch.nn.functional.softsign(out[:, 0]) * 1.5, -1.0, 1.0) * args.clip
+			return eval_out
 
 	model = SingleMLP(in_dim=L, dropout=args.dropout, input_dropout=args.input_dropout).to(device)
 
@@ -544,14 +553,16 @@ if __name__ == "__main__":
 	print(f"  Total parameters: {params:,}")
 	print(f"  Input feature dimension: {L}")
 	print(f"  Dropout rates: hidden={args.dropout}, input={args.input_dropout}")
+	print(f"  Target blend lambda: {args.lambda_w} (winner={args.lambda_w*100:.0f}%, search_eval={(1-args.lambda_w)*100:.0f}%)")
+	print(f"  Huber loss delta: {args.huber_delta} cp (linear after {args.huber_delta} cp)")
 	print(f"  Average zero features: {zero_ratio*100:.2f}% ({L * zero_ratio:.1f} / {L} entries)")
 	print(f"  Max FLOPs (100% non-zero inputs): {max_flops:,}")
 	print(f"  Expected FLOPs (skipping zero inputs in layer 1): {expected_flops:,.1f}\n")
 
 	optimizer = torch.optim.Adam(all_params, lr=args.lr0)
 	scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr1)
-	loss_fn_eval = nn.MSELoss()
-	loss_fn_winner = nn.BCELoss()
+	huber_delta_norm = args.huber_delta / args.clip
+	loss_fn_huber = nn.HuberLoss(delta=huber_delta_norm, reduction='mean')
 	lambda_w = args.lambda_w
 	l2_coef = args.l2
 
@@ -600,7 +611,7 @@ if __name__ == "__main__":
 				f.write(f"\tconst {ident}: [f32; {n}] = {body};\n\n")
 		return next_layer
 
-	def export_rust_weights_and_stats(rust_out_path, m, epoch_num, total_epochs, val_loss, val_rmse, val_mae_w, zero_r):
+	def export_rust_weights_and_stats(rust_out_path, m, epoch_num, total_epochs, val_loss, val_eval_loss, val_win_loss, val_target_mae, val_eval_mae, zero_r):
 		dataset_src = bin_file if using_bin else args.evals
 		n_tr = len(idx_train)
 		n_te = len(idx_test)
@@ -610,10 +621,13 @@ if __name__ == "__main__":
 			f.write("-----------------------------\n")
 			f.write(f"Dataset:            {dataset_src} ({n_tr + n_te:,} samples: {n_tr:,} train / {n_te:,} test)\n")
 			f.write(f"Epochs:             {total_epochs} (Best Epoch: {epoch_num})\n")
+			f.write(f"Objective:          Huber loss (delta={args.huber_delta} cp) on blended target (lambda={args.lambda_w})\n")
 			f.write(f"Best Val Loss:      {val_loss:.6f}\n\n")
 			f.write("Validation Metrics (Test Set):\n")
-			f.write(f"  RMSE:             {val_rmse:.4f} cp\n")
-			f.write(f"  Winner MAE:       {val_mae_w:.4f}\n\n")
+			f.write(f"  Eval Loss (λ=0):  {val_eval_loss:.6f}\n")
+			f.write(f"  Win Loss (λ=1):   {val_win_loss:.6f}\n")
+			f.write(f"  Target MAE:       {val_target_mae:.2f} cp\n")
+			f.write(f"  Teacher Eval MAE: {val_eval_mae:.2f} cp\n\n")
 			f.write("Model Summary:\n")
 			f.write(f"  Parameters:       {params:,}\n")
 			f.write(f"  Input Dimension:  {L}\n")
@@ -624,68 +638,85 @@ if __name__ == "__main__":
 			f.write("\t// --- single mlp (all features) ---\n")
 			write_module_weights(f, m.named_parameters(), "M_", 0)
 
+	best_val_eval_loss = 0.0
+	best_val_win_loss = 0.0
+
 	try:
 		for epoch in range(args.epochs):
-			running_eval_loss = torch.tensor(0.0, device=device)
-			running_eval_sq_err = torch.tensor(0.0, device=device)
-			running_winner_loss = torch.tensor(0.0, device=device)
-			running_winner_abs_err = torch.tensor(0.0, device=device)
+			running_huber_loss = torch.tensor(0.0, device=device)
+			running_reg_loss = torch.tensor(0.0, device=device)
+			running_target_mae = torch.tensor(0.0, device=device)
+			running_eval_mae = torch.tensor(0.0, device=device)
 			running_total_loss = torch.tensor(0.0, device=device)
 			total = 0
 			model.train()
 			for xb, yb, wb, _ in train_loader:
 				xb, yb, wb = xb.to(device).float(), yb.to(device).float(), wb.to(device).float()
-				pred_eval, pred_winner = model(xb)
-				loss_eval = loss_fn_eval(pred_eval/args.clip, yb/args.clip)
-				loss_winner = lambda_w * loss_fn_winner(pred_winner, wb)
+				winner_contrib = winner_to_cp(wb)
+				eval_contrib = yb
+				target_eval = lambda_w * winner_contrib + (1.0 - lambda_w) * eval_contrib
+
+				pred_eval = model(xb)
+				loss_huber = loss_fn_huber(pred_eval / args.clip, target_eval / args.clip)
 				l2_reg = l2_coef * sum(p.pow(2).sum() for p in all_params)
-				loss = loss_eval + loss_winner + l2_reg
+				loss = loss_huber + l2_reg
+
 				optimizer.zero_grad(); loss.backward(); optimizer.step()
+
 				bs = xb.size(0)
-				running_eval_loss += loss_eval.detach() * bs
-				running_eval_sq_err += ((pred_eval.detach() - yb)**2).sum()
-				running_winner_loss += loss_winner.detach() * bs
-				running_winner_abs_err += (pred_winner.detach() - wb).abs().sum()
+				running_huber_loss += loss_huber.detach() * bs
+				running_reg_loss += l2_reg.detach() * bs
+				running_target_mae += (pred_eval.detach() - target_eval).abs().sum()
+				running_eval_mae += (pred_eval.detach() - yb).abs().sum()
 				running_total_loss += loss.detach() * bs
 				total += bs
-			train_eval_loss = (running_eval_loss / total).item()
-			train_eval_rmse = ((running_eval_sq_err / total) ** 0.5).item()
-			train_winner_loss = (running_winner_loss / total).item()
-			train_winner_mae = (running_winner_abs_err / total).item()
-			train_reg_loss = (l2_coef * sum(p.pow(2).sum() for p in all_params)).item()
+
+			train_huber_loss = (running_huber_loss / total).item()
+			train_reg_loss = (running_reg_loss / total).item()
+			train_target_mae = (running_target_mae / total).item()
+			train_eval_mae = (running_eval_mae / total).item()
 			train_total_loss = (running_total_loss / total).item()
 
 			model.eval()
+			val_huber_loss_t = torch.tensor(0.0, device=device)
 			val_eval_loss_t = torch.tensor(0.0, device=device)
-			val_eval_sq_err = torch.tensor(0.0, device=device)
-			val_winner_loss_t = torch.tensor(0.0, device=device)
-			val_winner_abs_err = torch.tensor(0.0, device=device)
+			val_win_loss_t = torch.tensor(0.0, device=device)
+			val_target_mae_t = torch.tensor(0.0, device=device)
+			val_eval_mae_t = torch.tensor(0.0, device=device)
 			val_total = 0
 			with torch.no_grad():
 				for xb, yb, wb, _ in test_loader:
 					xb, yb, wb = xb.to(device).float(), yb.to(device).float(), wb.to(device).float()
-					val_eval_pred, val_winner_pred = model(xb)
+					winner_contrib = winner_to_cp(wb)
+					eval_contrib = yb
+					target_eval = lambda_w * winner_contrib + (1.0 - lambda_w) * eval_contrib
+
+					pred_eval = model(xb)
 					bs = xb.size(0)
-					val_eval_loss_t += loss_fn_eval(val_eval_pred/args.clip, yb/args.clip) * bs
-					val_eval_sq_err += ((val_eval_pred - yb)**2).sum()
-					val_winner_loss_t += lambda_w * loss_fn_winner(val_winner_pred, wb) * bs
-					val_winner_abs_err += (val_winner_pred - wb).abs().sum()
+					val_huber_loss_t += loss_fn_huber(pred_eval / args.clip, target_eval / args.clip) * bs
+					val_eval_loss_t += loss_fn_huber(pred_eval / args.clip, eval_contrib / args.clip) * bs
+					val_win_loss_t += loss_fn_huber(pred_eval / args.clip, winner_contrib / args.clip) * bs
+					val_target_mae_t += (pred_eval - target_eval).abs().sum()
+					val_eval_mae_t += (pred_eval - yb).abs().sum()
 					val_total += bs
 
+			val_huber_loss = (val_huber_loss_t / val_total).item()
 			val_eval_loss = (val_eval_loss_t / val_total).item()
-			val_eval_rmse = ((val_eval_sq_err / val_total) ** 0.5).item()
-			val_winner_loss = (val_winner_loss_t / val_total).item()
-			val_winner_mae = (val_winner_abs_err / val_total).item()
+			val_win_loss = (val_win_loss_t / val_total).item()
+			val_target_mae = (val_target_mae_t / val_total).item()
+			val_eval_mae = (val_eval_mae_t / val_total).item()
 			val_reg_loss = (l2_coef * sum(p.pow(2).sum() for p in all_params)).item()
-			val_total_loss = val_eval_loss + val_winner_loss + val_reg_loss
+			val_total_loss = val_huber_loss + val_reg_loss
 
 			# If new best model found, save checkpoint and Rust code immediately
-			if val_eval_loss < best_val_loss:
-				best_val_loss = val_eval_loss
+			if val_huber_loss < best_val_loss:
+				best_val_loss = val_huber_loss
+				best_val_eval_loss = val_eval_loss
+				best_val_win_loss = val_win_loss
 				best_epoch = epoch + 1
 				best_state = {'model': {k: v.cpu().clone() for k, v in model.state_dict().items()}}
 				torch.save(best_state, "logs/best_mlp_eval.pth")
-				export_rust_weights_and_stats("logs/eval_mlp.rs", model, best_epoch, args.epochs, best_val_loss, val_eval_rmse, val_winner_mae, zero_ratio)
+				export_rust_weights_and_stats("logs/eval_mlp.rs", model, best_epoch, args.epochs, best_val_loss, val_eval_loss, val_win_loss, val_target_mae, val_eval_mae, zero_ratio)
 
 			history['train_loss'].append(train_total_loss)
 			history['test_loss'].append(val_total_loss)
@@ -695,8 +726,8 @@ if __name__ == "__main__":
 
 			print(
 				f"Epoch {epoch+1:3d}/{args.epochs} lr={cur_lr:.2e} | "
-				f"TRAIN eval={train_eval_rmse:.1f} win={train_winner_mae:.4f} loss={100*train_total_loss:.4f}={100*train_eval_loss:.4f}+{100*train_winner_loss:.4f}+{100*train_reg_loss:.4f} | "
-				f"TEST  eval={val_eval_rmse:.1f} win={val_winner_mae:.4f} loss={100*val_total_loss:.4f}={100*val_eval_loss:.4f}+{100*val_winner_loss:.4f}+{100*val_reg_loss:.4f}"
+				f"TRAIN loss={100*train_total_loss:.4f}={100*train_huber_loss:.4f}+{100*train_reg_loss:.4f} mae={train_target_mae:.1f} | "
+				f"TEST  loss={100*val_total_loss:.4f} eval={100*val_eval_loss:.4f} win={100*val_win_loss:.4f} mae={val_target_mae:.1f}"
 			)
 	except KeyboardInterrupt:
 		print(f"\nTraining interrupted by user at epoch {epoch+1}. Loading best model checkpoint (epoch {best_epoch})...")
@@ -724,37 +755,48 @@ if __name__ == "__main__":
 			json.dump(history, f)
 
 	model.eval()
-	all_preds, all_y = [], []
+	all_preds, all_target, all_y = [], [], []
 	with torch.no_grad():
-		for xb, yb, _, _ in test_loader:
+		for xb, yb, wb, _ in test_loader:
 			xb = xb.to(device).float()
-			eval_preds, _ = model(xb)
+			yb = yb.to(device).float()
+			wb = wb.to(device).float()
+			winner_contrib = winner_to_cp(wb)
+			target = lambda_w * winner_contrib + (1.0 - lambda_w) * yb
+			eval_preds = model(xb)
 			all_preds.append(eval_preds.cpu().numpy())
+			all_target.append(target.cpu().numpy())
 			all_y.append(yb.cpu().numpy())
 
 	mlp_preds = np.concatenate(all_preds)
+	target_test = np.concatenate(all_target)
 	y_test_true = np.concatenate(all_y)
-	mlp_metrics = metrics(y_test_true, mlp_preds)
 
-	errors = np.abs(mlp_preds - y_test_true)
+	target_metrics = metrics(target_test, mlp_preds)
+	teacher_metrics = metrics(y_test_true, mlp_preds)
+
+	errors = np.abs(mlp_preds - target_test)
 	p50_err = float(np.percentile(errors, 50))
 	p90_err = float(np.percentile(errors, 90))
 	p99_err = float(np.percentile(errors, 99))
 	valid_sign = (y_test_true != 0)
 	sign_acc = float(np.mean(np.sign(mlp_preds[valid_sign]) == np.sign(y_test_true[valid_sign])) * 100.0) if np.any(valid_sign) else 0.0
 
-	print(f"\nBest epoch (by val loss): {best_epoch}/{args.epochs}, val_total_loss: {best_val_loss:.6f}")
-	print("MLP on test set (using best-epoch weights) - evaluation output:")
-	print(f"  RMSE:            {mlp_metrics['rmse']:.4f} cp")
-	print(f"  MAE:             {mlp_metrics['mae']:.4f} cp")
-	print(f"  R² Score:        {mlp_metrics['r2']:.4f} ({mlp_metrics['r2']*100:.2f}% variance explained)")
-	print(f"  Sign Accuracy:   {sign_acc:.2f}%")
+	print(f"\nBest epoch (by val loss): {best_epoch}/{args.epochs}, val_huber_loss: {best_val_loss:.6f}")
+	print("MLP on test set vs Blended Target:")
+	print(f"  RMSE:            {target_metrics['rmse']:.4f} cp")
+	print(f"  MAE:             {target_metrics['mae']:.4f} cp")
+	print(f"  R² Score:        {target_metrics['r2']:.4f} ({target_metrics['r2']*100:.2f}% variance explained)")
 	print(f"  Median Error:    {p50_err:.2f} cp")
 	print(f"  P90 Error:       {p90_err:.2f} cp")
 	print(f"  P99 Error:       {p99_err:.2f} cp")
+	print("MLP on test set vs Teacher Search Eval:")
+	print(f"  Teacher MAE:     {teacher_metrics['mae']:.4f} cp")
+	print(f"  Teacher RMSE:    {teacher_metrics['rmse']:.4f} cp")
+	print(f"  Sign Accuracy:   {sign_acc:.2f}%")
 
 	rust_out_path = "logs/eval_mlp.rs"
-	export_rust_weights_and_stats(rust_out_path, model, best_epoch, args.epochs, best_val_loss, mlp_metrics['rmse'], mlp_metrics['mae'], zero_ratio)
+	export_rust_weights_and_stats(rust_out_path, model, best_epoch, args.epochs, best_val_loss, best_val_eval_loss, best_val_win_loss, target_metrics['mae'], teacher_metrics['mae'], zero_ratio)
 	print(f"Rust weights and stats written to {rust_out_path}")
 
 
